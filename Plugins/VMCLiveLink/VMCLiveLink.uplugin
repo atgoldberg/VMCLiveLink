@@ -1,0 +1,17 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "VMC Live Link",
+  "Description": "Receives VMC (OSC) and streams it to Unreal via Live Link.",
+  "Category": "Live Link",
+  "EnabledByDefault": true,
+  "Modules": [
+    { "Name": "VMCLiveLink", "Type": "Runtime", "LoadingPhase": "Default" },
+    { "Name": "VMCLiveLinkEditor", "Type": "Editor", "LoadingPhase": "PostEngineInit" }
+  ],
+  "Plugins": [
+    { "Name": "LiveLink", "Enabled": true },
+    { "Name": "OSC", "Enabled": true }
+  ]
+}

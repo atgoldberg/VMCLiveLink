@@ -1,0 +1,23 @@
+# Unreal transient/build
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/*/Binaries/
+Build/*/Intermediate/
+
+# IDE/OS clutter
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.VC.opendb
+.DS_Store
+Thumbs.db
+
+# Packaged & autosaves
+Saved/Autosaves/
+Packaged/
+Releases/
