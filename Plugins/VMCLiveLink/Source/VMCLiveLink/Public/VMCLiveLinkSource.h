@@ -49,11 +49,6 @@ private:
     void PushStaticData(bool bForce = false); // bones + property names
     void PushFrame();                         // bone transforms + property values
 
-    // Unity→UE basis (with optional yaw folded in)
-    static FMatrix BuildUnityToUEBasis(float YawDeg);
-    static FORCEINLINE FVector MapPos_UnityToUE(const FVector& U, bool bMetersToCm, float YawDeg);
-    static FQuat ConvertQuat_UnityToUE(const FQuat& Qu, float YawDeg);
-
     // Cached copies of the asset’s maps (so we don’t re-hash every frame)
     TMap<FName, FName> CachedBoneMap;
     TMap<FName, FName> CachedCurveMap;
