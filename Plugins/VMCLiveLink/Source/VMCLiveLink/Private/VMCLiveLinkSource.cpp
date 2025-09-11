@@ -43,8 +43,15 @@ static bool ReadFloat7(const FOSCMessage& Msg,
 {
     const TArray<UE::OSC::FOSCData>& A = Msg.GetArgumentsChecked();
     if (A.Num() != 7) return false;
-    px = A[0].GetFloat(); py = A[1].GetFloat(); pz = A[2].GetFloat();
-    qx = A[3].GetFloat(); qy = A[4].GetFloat(); qz = A[5].GetFloat(); qw = A[6].GetFloat();
+    px = A[0].GetFloat();
+    py = A[1].GetFloat();
+    pz = A[2].GetFloat();
+    
+    qx = A[3].GetFloat();
+    qy = A[4].GetFloat();
+    qz = A[5].GetFloat();
+    qw = A[6].GetFloat();
+    
     return true;
 }
 
@@ -138,60 +145,7 @@ void FVMCLiveLinkSource::StopOSC()
     }
 }
 
-// ---------------- Unity→UE change-of-basis (with yaw) ----------------
 
-// Permutation C: Unity (X right, Y up, Z fwd) -> UE (X fwd, Y right, Z up)
-// i.e. (x',y',z') = (z, x, y)
-static FMatrix MakePermutationC()
-{
-    return FMatrix(
-        FPlane(0, 0, 1, 0), // row 0
-        FPlane(1, 0, 0, 0), // row 1
-        FPlane(0, 1, 0, 0), // row 2
-        FPlane(0, 0, 0, 1)
-    );
-}
-
-// Build B = Rz(yaw) * C  (fold user yaw into the basis; no visible spin at rest)
-FMatrix FVMCLiveLinkSource::BuildUnityToUEBasis(float YawDeg)
-{
-    // Yaw is rotation about UE Z
-    const FMatrix R = FRotationMatrix(FRotator(0.f, YawDeg, 0.f));
-    const FMatrix C = FMatrix(
-        FPlane(0, 0, 1, 0),  // Unity→UE permutation rows
-        FPlane(1, 0, 0, 0),
-        FPlane(0, 1, 0, 0),
-        FPlane(0, 0, 0, 1)
-    );
-    return R * C; // B = Rz(yaw) * C
-}
-
-FVector FVMCLiveLinkSource::MapPos_UnityToUE(const FVector& U, bool bMetersToCm, float YawDeg)
-{
-    const FMatrix B = BuildUnityToUEBasis(YawDeg);
-    const float S = bMetersToCm ? 100.f : 1.f;
-    return B.TransformVector(U) * S; // rotation only
-}
-
-// Proper change-of-basis for rotations: Re = B * Ru * B^T
-FQuat FVMCLiveLinkSource::ConvertQuat_UnityToUE(const FQuat& Qu, float YawDeg)
-{
-    // Unity rotation matrix Mu from quaternion axes
-    const FVector Xu = Qu.GetAxisX();
-    const FVector Yu = Qu.GetAxisY();
-    const FVector Zu = Qu.GetAxisZ();
-
-    FMatrix Mu = FMatrix::Identity;
-    Mu.SetAxes(&Xu, &Yu, &Zu);
-
-    const FMatrix B = BuildUnityToUEBasis(YawDeg);
-    const FMatrix BT = B.GetTransposed();
-    const FMatrix Me = B * Mu * BT;
-
-    FQuat Qe(Me);
-    Qe.Normalize();
-    return Qe;
-}
 
 // ---------------- OSC message handler ----------------
 
@@ -207,9 +161,20 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
 
         const FName BoneName(*Bone);
 
-        FVector P = bUnityToUE ? MapPos_UnityToUE(FVector(px, py, pz), bMetersToCm, YawOffsetDeg)
+        // Unity -> UE5 Conversions
+
+        const float upx = px * 100.f;
+        const float upy = py * 100.f;
+        const float upz = pz * 100.f;
+
+        const float uqx = -qx;
+        const float uqy = qz;
+        const float uqz = qy;
+        const float uqw = qw;
+
+        FVector P = bUnityToUE ? FVector(upx, upy, upz)
             : FVector(px, py, pz);
-        FQuat   Q = bUnityToUE ? ConvertQuat_UnityToUE(FQuat(qx, qy, qz, qw), YawOffsetDeg)
+        FQuat   Q = bUnityToUE ? FQuat(uqx, uqy, uqz, uqw)
             : FQuat(qx, qy, qz, qw);
 
         const FTransform Xf(Q, P, FVector(1));
@@ -231,9 +196,19 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
         if (!ReadFloat7(Msg, px, py, pz, qx, qy, qz, qw))
             return;
 
-        FVector PR = bUnityToUE ? MapPos_UnityToUE(FVector(px, py, pz), bMetersToCm, YawOffsetDeg)
+        // Unity -> UE5 Conversions
+        const float upx = px * 100.f;
+        const float upy = py * 100.f;
+        const float upz = pz * 100.f;
+
+        const float uqx = -qx;
+        const float uqy = qz;
+        const float uqz = qy;
+        const float uqw = qw;
+
+        FVector PR = bUnityToUE ? FVector(upx, upy, upz)
             : FVector(px, py, pz);
-        FQuat   QR = bUnityToUE ? ConvertQuat_UnityToUE(FQuat(qx, qy, qz, qw), YawOffsetDeg)
+        FQuat   QR = bUnityToUE ? FQuat(uqx, uqy, uqz, uqw)
             : FQuat(qx, qy, qz, qw);
 
         {

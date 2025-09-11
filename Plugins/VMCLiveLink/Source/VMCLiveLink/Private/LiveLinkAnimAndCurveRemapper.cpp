@@ -13,7 +13,6 @@ ULiveLinkSubjectRemapper::FWorkerSharedPtr ULiveLinkAnimAndCurveRemapper::Create
 	Worker = MakeShared<FLiveLinkAnimAndCurveRemapperWorker>();
 	Worker->BoneNameMap = BoneNameMap;     // base class map
 	Worker->CurveNameMap = CurveNameMap;    // our curve map
-
 	Worker->bEnableMetaHumanCurveNormalizer = bEnableMetaHumanCurveNormalizer;
 	Worker->JoyToSmileStrength = JoyToSmileStrength;
 	Worker->BlinkMirrorStrength = BlinkMirrorStrength;

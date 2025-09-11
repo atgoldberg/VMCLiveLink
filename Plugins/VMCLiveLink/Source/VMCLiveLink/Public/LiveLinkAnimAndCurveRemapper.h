@@ -24,6 +24,21 @@ enum class ELLRemapPreset : uint8
 	Custom  UMETA(DisplayName = "Custom (JSON)")
 };
 
+// Converts incoming Unity rotations to Unreal, matching the Control Rig (ZYX Euler) remap.
+static inline FQuat ConvertUnityToUnrealQuat(const FQuat& In)
+{
+	// Work in degrees to match the Control Rig nodes.
+	const FVector EulerXYZ = In.Euler(); // degrees
+	const double X = EulerXYZ.X, Y = EulerXYZ.Y, Z = EulerXYZ.Z;
+
+	// Your graph used ToEuler (ZYX), FromEuler (ZYX) with component remap:
+	// X' = Z, Y' = X, Z' = -Y
+	const FVector RemappedZYX(-Z, X, -Y);
+
+	// UE’s MakeFromEuler expects XYZ packing; we keep the same packing we used above.
+	return FQuat::MakeFromEuler(RemappedZYX).GetNormalized();
+}
+
 // ---------------- Worker ----------------
 class FLiveLinkAnimAndCurveRemapperWorker final : public ILiveLinkSubjectRemapperWorker
 {
@@ -64,6 +79,7 @@ public:
 
 		const FLiveLinkBaseStaticData& Base = *InStatic.Cast<FLiveLinkBaseStaticData>();
 		const TArray<FName>& Names = Base.PropertyNames;
+
 
 		auto& Anim = *InOutFrameData.Cast<FLiveLinkAnimationFrameData>();
 		TArray<float>& Values = Anim.PropertyValues;
