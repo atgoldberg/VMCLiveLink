@@ -26,6 +26,7 @@ public:
     FVMCLiveLinkSource(const FString& InSourceName);                                  // defaults: port=39539, unity→ue=on, meters→cm=on, yaw=0
     FVMCLiveLinkSource(const FString& InSourceName, int32 InPort);
     FVMCLiveLinkSource(const FString& InSourceName, int32 InPort, bool bInUnityToUE, bool bInMetersToCm, float InYawDeg);
+    FVMCLiveLinkSource(const FString& InSourceName, int32 InPort, bool bInUnityToUE, bool bInMetersToCm, float InYawDeg, FString Subject);
 
     // ILiveLinkSource
     virtual void ReceiveClient(ILiveLinkClient* InClient, FGuid InSourceGuid) override;
@@ -79,7 +80,7 @@ private:
     bool  bUnityToUE = true;   // enable basis conversion
     bool  bMetersToCm = true;   // scale positions 1m→100cm
     float YawOffsetDeg = 0.f;    // extra yaw about UE Z (re-express frame; no visible spin)
-
+ 
     // Live Link client
     ILiveLinkClient* Client = nullptr;
     FGuid  SourceGuid;
