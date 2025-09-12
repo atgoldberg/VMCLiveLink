@@ -17,27 +17,14 @@
 UENUM(BlueprintType)
 enum class ELLRemapPreset : uint8
 {
-	None    UMETA(DisplayName = "None / Manual"),
-	ARKit   UMETA(DisplayName = "ARKit (MetaHuman-friendly)"),
-	VMC_VRM UMETA(DisplayName = "VMC / VRM (VMC protocol-style)"),
-	Rokoko  UMETA(DisplayName = "Rokoko (ARKit names)"),
-	Custom  UMETA(DisplayName = "Custom (JSON)")
+	None    UMETA(DisplayName	= "None / Manual"),
+	ARKit   UMETA(DisplayName	= "ARKit (MetaHuman-friendly)"),
+	VMC_VRM UMETA(DisplayName	= "VMC / VRM (VMC protocol-style)"),
+	VRoid	UMETA(DisplayName	= "VMC / VRoid"),
+	Rokoko  UMETA(DisplayName	= "Rokoko (ARKit names)"),
+	Custom  UMETA(DisplayName	= "Custom (JSON)")
 };
 
-// Converts incoming Unity rotations to Unreal, matching the Control Rig (ZYX Euler) remap.
-static inline FQuat ConvertUnityToUnrealQuat(const FQuat& In)
-{
-	// Work in degrees to match the Control Rig nodes.
-	const FVector EulerXYZ = In.Euler(); // degrees
-	const double X = EulerXYZ.X, Y = EulerXYZ.Y, Z = EulerXYZ.Z;
-
-	// Your graph used ToEuler (ZYX), FromEuler (ZYX) with component remap:
-	// X' = Z, Y' = X, Z' = -Y
-	const FVector RemappedZYX(-Z, X, -Y);
-
-	// UE’s MakeFromEuler expects XYZ packing; we keep the same packing we used above.
-	return FQuat::MakeFromEuler(RemappedZYX).GetNormalized();
-}
 
 // ---------------- Worker ----------------
 class FLiveLinkAnimAndCurveRemapperWorker final : public ILiveLinkSubjectRemapperWorker
@@ -164,10 +151,10 @@ public:
 public:
 	// NOTE: BoneNameMap is declared on the base (ULiveLinkSubjectRemapper). Don't redeclare it here.
 
-	UPROPERTY(EditAnywhere, Category = "Remapper|Maps")
+	UPROPERTY(EditAnywhere, Category = "Remapper")
 	TMap<FName, FName> CurveNameMap;
 
-	UPROPERTY(EditAnywhere, Category = "Remapper|Seed", meta = (DisplayThumbnail = "false"))
+	UPROPERTY(EditAnywhere, Category = "Remapper|Skeleton", meta = (DisplayThumbnail = "false"))
 	TSoftObjectPtr<USkeletalMesh> ReferenceSkeleton;
 
 	UPROPERTY(EditAnywhere, Category = "Remapper|Preset")
@@ -191,6 +178,7 @@ private:
 	void SeedFromReferenceSkeleton();
 	void SeedCurves_ARKit();
 	void SeedCurves_VMC_VRM();
+	void SeedCurvesAndBones_VRoid();
 	void SeedCurves_Rokoko();
 	void SeedBones_FromHumanoidLike(const TArray<FName>& Incoming);
 

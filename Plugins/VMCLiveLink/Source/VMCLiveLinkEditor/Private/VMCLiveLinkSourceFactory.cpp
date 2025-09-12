@@ -84,8 +84,6 @@ static FString ParseSubject(const FString& Conn, FString DefaultSubject)
     return Subject;
 }
 
-
-
 TSharedPtr<ILiveLinkSource> UVMCLiveLinkSourceFactory::CreateSource(const FString& ConnectionString) const
 {
     const int32 Port = ParsePort(ConnectionString, 39539);

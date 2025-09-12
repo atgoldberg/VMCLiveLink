@@ -6,6 +6,23 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "RemapSync.h"
+#include <Remapper/LiveLinkSkeletonRemapper.h>
+#include <LiveLinkRemapAsset.h>
+
+
+static void GetBoneNames(TSoftObjectPtr<USkeletalMesh> Mesh, TArray<FName>& Out)
+{
+	Out.Reset();
+	if (!Mesh) return;
+
+	const FReferenceSkeleton& RefSkel = Mesh->GetRefSkeleton();
+	const int32 NumBones = RefSkel.GetNum();
+	Out.Reserve(NumBones);
+	for (int32 i = 0; i < NumBones; ++i)
+	{
+		Out.Add(RefSkel.GetBoneName(i));
+	}
+}
 
 // Qualify the return type to avoid “assumed int / different basic type”.
 ULiveLinkSubjectRemapper::FWorkerSharedPtr ULiveLinkAnimAndCurveRemapper::CreateWorker()
@@ -87,9 +104,10 @@ void ULiveLinkAnimAndCurveRemapper::ApplyPreset(ELLRemapPreset InPreset)
 {
 	switch (InPreset)
 	{
-	case ELLRemapPreset::ARKit:   SeedCurves_ARKit();   break;
-	case ELLRemapPreset::VMC_VRM: SeedCurves_VMC_VRM(); break;
-	case ELLRemapPreset::Rokoko:  SeedCurves_Rokoko();  break;
+	case ELLRemapPreset::ARKit:		SeedCurves_ARKit();   break;
+	case ELLRemapPreset::VMC_VRM:	SeedCurves_VMC_VRM(); break;
+	case ELLRemapPreset::VRoid:		SeedCurvesAndBones_VRoid(); break;
+	case ELLRemapPreset::Rokoko:	SeedCurves_Rokoko();  break;
 	default: break;
 	}
 
@@ -175,6 +193,84 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurves_ARKit()
 	}
 }
 
+void ULiveLinkAnimAndCurveRemapper::SeedCurvesAndBones_VRoid()
+{
+	BoneNameMap.FindOrAdd("Hips")			= "J_Bip_C_Hips";
+	BoneNameMap.FindOrAdd("Spine")			= "J_Bip_C_Spine";
+	BoneNameMap.FindOrAdd("Chest")			= "J_Bip_C_Chest";
+	BoneNameMap.FindOrAdd("UpperChest")		= "J_Bip_C_UpperChest";
+	BoneNameMap.FindOrAdd("Neck")			= "J_Bip_C_Neck";
+	BoneNameMap.FindOrAdd("Head")			= "J_Bip_C_Head";
+	BoneNameMap.FindOrAdd("LeftEye")		= "J_Adj_L_FaceEye";
+	BoneNameMap.FindOrAdd("RightEye")		= "J_Adj_R_FaceEye";
+	BoneNameMap.FindOrAdd("LeftUpperLeg")	= "J_Bip_L_UpperLeg";
+	BoneNameMap.FindOrAdd("RightUpperLeg")	= "J_Bip_R_UpperLeg";
+	BoneNameMap.FindOrAdd("LeftLowerLeg")	= "J_Bip_L_LowerLeg";
+	BoneNameMap.FindOrAdd("RightLowerLeg")	= "J_Bip_R_LowerLeg";
+	BoneNameMap.FindOrAdd("LeftFoot")		= "J_Bip_L_Foot";
+	BoneNameMap.FindOrAdd("RightFoot")		= "J_Bip_R_Foot";
+	BoneNameMap.FindOrAdd("LeftToes")		= "J_Bip_L_Toes";
+	BoneNameMap.FindOrAdd("RightToes")		= "J_Bip_R_Toes";
+	BoneNameMap.FindOrAdd("LeftShoulder")	= "J_Bip_L_Shoulder";
+	BoneNameMap.FindOrAdd("RightShoulder")	= "J_Bip_R_Shoulder";
+	BoneNameMap.FindOrAdd("LeftUpperArm")	= "J_Bip_L_UpperArm";
+	BoneNameMap.FindOrAdd("RightUpperArm")	= "J_Bip_R_UpperArm";
+	BoneNameMap.FindOrAdd("LeftLowerArm")	= "J_Bip_L_LowerArm";
+	BoneNameMap.FindOrAdd("RightLowerArm")	= "J_Bip_R_LowerArm";
+	BoneNameMap.FindOrAdd("LeftHand")		= "J_Bip_L_Hand";
+	BoneNameMap.FindOrAdd("RightHand")		= "J_Bip_R_Hand";
+	BoneNameMap.FindOrAdd("LeftThumbProximal")			= "J_Bip_L_Thumb1";
+	BoneNameMap.FindOrAdd("LeftThumbIntermediate")		= "J_Bip_L_Thumb2";
+	BoneNameMap.FindOrAdd("LeftThumbDistal")			= "J_Bip_L_Thumb3";
+	BoneNameMap.FindOrAdd("RightThumbProximal")			= "J_Bip_R_Thumb1";
+	BoneNameMap.FindOrAdd("RightThumbIntermediate")		= "J_Bip_R_Thumb2";
+	BoneNameMap.FindOrAdd("RightThumbDistal")			= "J_Bip_R_Thumb3";
+
+	BoneNameMap.FindOrAdd("LeftIndexProximal")			= "J_Bip_L_Index1";
+	BoneNameMap.FindOrAdd("LeftIndexIntermediate")		= "J_Bip_L_Index2";
+	BoneNameMap.FindOrAdd("LeftIndexDistal")			= "J_Bip_L_Index3";
+	BoneNameMap.FindOrAdd("RightIndexProximal")			= "J_Bip_R_Index1";
+	BoneNameMap.FindOrAdd("RightIndexIntermediate")		= "J_Bip_R_Index2";
+	BoneNameMap.FindOrAdd("RightIndexDistal")			= "J_Bip_R_Index3";
+
+	BoneNameMap.FindOrAdd("LeftMiddleProximal")			= "J_Bip_L_Middle1";
+	BoneNameMap.FindOrAdd("LeftMiddleIntermediate")		= "J_Bip_L_Middle2";
+	BoneNameMap.FindOrAdd("LeftMiddleDistal")			= "J_Bip_L_Middle3";
+	BoneNameMap.FindOrAdd("RightMiddleProximal")		= "J_Bip_R_Middle1";
+	BoneNameMap.FindOrAdd("RightMiddleIntermediate")	= "J_Bip_R_Middle2";
+	BoneNameMap.FindOrAdd("RightMiddleDistal")			= "J_Bip_R_Middle3";
+
+	BoneNameMap.FindOrAdd("LeftRingProximal")			= "J_Bip_L_Ring1";
+	BoneNameMap.FindOrAdd("LeftRingIntermediate")		= "J_Bip_L_Ring2";
+	BoneNameMap.FindOrAdd("LeftRingDistal")				= "J_Bip_L_Ring3";
+	BoneNameMap.FindOrAdd("RightRingProximal")			= "J_Bip_R_Ring1";
+	BoneNameMap.FindOrAdd("RightRingIntermediate")		= "J_Bip_R_Ring2";
+	BoneNameMap.FindOrAdd("RightRingDistal")			= "J_Bip_R_Ring3";
+
+	BoneNameMap.FindOrAdd("LeftLittleProximal")			= "J_Bip_L_Little1";
+	BoneNameMap.FindOrAdd("LeftLittleIntermediate")		= "J_Bip_L_Little2";
+	BoneNameMap.FindOrAdd("LeftLittleDistal")			= "J_Bip_L_Little3";
+	BoneNameMap.FindOrAdd("RightLittleProximal")		= "J_Bip_R_Little1";
+	BoneNameMap.FindOrAdd("RightLittleIntermediate")	= "J_Bip_R_Little2";
+	BoneNameMap.FindOrAdd("RightLittleDistal")			= "J_Bip_R_Little3";
+
+	CurveNameMap.FindOrAdd("Blink") = "Face.M_F00_000_Fcl_EYE_Close"; // single blink → we’ll mirror in runtime
+	CurveNameMap.FindOrAdd("Blink_L") = "Face.M_F00_000_Fcl_EYE_Close_L";
+	CurveNameMap.FindOrAdd("Blink_R") = "Face.M_F00_000_Fcl_EYE_Close_R";
+
+	CurveNameMap.FindOrAdd("Joy") = "Face.M_F00_000_Fcl_ALL_Joy";
+	CurveNameMap.FindOrAdd("Angry") = "Face.M_F00_000_Fcl_ALL_Angry";
+	CurveNameMap.FindOrAdd("Sorrow") = "Face.M_F00_000_Fcl_ALL_Sorrow";
+	CurveNameMap.FindOrAdd("Fun") = "Face.M_F00_000_Fcl_ALL_Fun";
+
+	// A I U E O → a pragmatic ARKit set
+	CurveNameMap.FindOrAdd("A") = "Face.M_F00_000_Fcl_MTH_A";
+	CurveNameMap.FindOrAdd("I") = "Face.M_F00_000_Fcl_MTH_I";
+	CurveNameMap.FindOrAdd("U") = "Face.M_F00_000_Fcl_MTH_U";
+	CurveNameMap.FindOrAdd("E") = "Face.M_F00_000_Fcl_MTH_E";
+	CurveNameMap.FindOrAdd("O") = "Face.M_F00_000_Fcl_MTH_O";
+}
+
 void ULiveLinkAnimAndCurveRemapper::SeedCurves_VMC_VRM()
 {
 	// Common VMC/VRM → ARKit-ish targets. Expand to match your source.
@@ -199,7 +295,18 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurves_VMC_VRM()
 	CurveNameMap.FindOrAdd("BrowDownRight") = "browDownRight";
 	CurveNameMap.FindOrAdd("BrowUpLeft") = "browOuterUpLeft";
 	CurveNameMap.FindOrAdd("BrowUpRight") = "browOuterUpRight";
+
+	//	BoneNameMap.FindOrAdd("Hips")			= "J_Bip_C_Hips";
+	//	BoneNameMap.FindOrAdd("Spine")			= "J_Bip_C_Spine";
+	//	BoneNameMap.FindOrAdd("Chest")			= "J_Bip_C_Chest";
+	//	BoneNameMap.FindOrAdd("UpperChest")		= "J_Bip_C_UpperChest";
+	//	BoneNameMap.FindOrAdd("Neck")			= "J_Bip_C_Neck";
+	//	BoneNameMap.FindOrAdd("Head")			= "J_Bip_C_Head";
+
+
 }
+
+
 
 void ULiveLinkAnimAndCurveRemapper::SeedCurves_Rokoko()
 {
@@ -276,11 +383,23 @@ void ULiveLinkAnimAndCurveRemapper::SeedBones_FromHumanoidLike(const TArray<FNam
 
 void ULiveLinkAnimAndCurveRemapper::SeedFromReferenceSkeleton()
 {
-	// Add project-specific bone aliases here if you want.
+
+
+
 }
 
-ELLRemapPreset ULiveLinkAnimAndCurveRemapper::GuessPreset(const TArray<FName>& /*BoneNames*/, const TArray<FName>& CurveNames) const
+ELLRemapPreset ULiveLinkAnimAndCurveRemapper::GuessPreset(const TArray<FName>& BoneNames, const TArray<FName>& CurveNames) const
 {
+	
+	TArray<FName> RefSkelBoneNames;
+	GetBoneNames(ReferenceSkeleton, RefSkelBoneNames);
+
+	for (const FName& N : RefSkelBoneNames)
+	{
+		const FString S = N.ToString();
+		if (S.StartsWith(TEXT("J_Bip_"))) return ELLRemapPreset::VRoid;
+	}
+
 	int32 ARKitHits = 0;
 	for (const FName& N : CurveNames)
 	{

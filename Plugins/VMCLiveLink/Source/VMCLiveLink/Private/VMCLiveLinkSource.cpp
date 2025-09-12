@@ -558,49 +558,30 @@ void FVMCLiveLinkSource::EnsureSubjectSettingsWithDefaults()
     if (!Client || bEnsuredDefaults)
         return;
 
+    check(IsInGameThread());
+
     const FLiveLinkSubjectKey Key{ SourceGuid, SubjectName };
 
     // 1) Bootstrap the subject settings if they don't exist yet.
-    UObject* SettingsObj = Client->GetSubjectSettings(Key);
-    if (!SettingsObj)
-    {
-        // Create settings by pushing a minimal static (role is the important bit)
-        FLiveLinkStaticDataStruct Bootstrap(FLiveLinkSkeletonStaticData::StaticStruct());
-        Client->PushSubjectStaticData_AnyThread(Key, ULiveLinkAnimationRole::StaticClass(), MoveTemp(Bootstrap));
-        SettingsObj = Client->GetSubjectSettings(Key);
-    }
 
-    // 2) Attach default remapper (if none)
-    if (ULiveLinkSubjectSettings* Settings = Cast<ULiveLinkSubjectSettings>(SettingsObj))
-    {
-        if (!Settings->Remapper)
-        {
-            const UVMCLiveLinkSettings* Proj = GetDefault<UVMCLiveLinkSettings>();
+    FLiveLinkSubjectPreset Preset;
+    Preset.Key = FLiveLinkSubjectKey{ SourceGuid, SubjectName };
+    Preset.Role = ULiveLinkAnimationRole::StaticClass();
 
-            UClass* RemapperClass = nullptr;
-            if (Proj && !Proj->DefaultRemapperClass.IsNull())
-            {
-                RemapperClass = Proj->DefaultRemapperClass.LoadSynchronous();
-            }
-            if (!RemapperClass)
-            {
-                RemapperClass = ULiveLinkAnimAndCurveRemapper::StaticClass(); // fallback
-            }
+    // Create a settings object we can hand to the client
+    ULiveLinkSubjectSettings* NewSettings = NewObject<ULiveLinkSubjectSettings>(GetTransientPackage());
 
-            ULiveLinkSubjectRemapper* R = NewObject<ULiveLinkSubjectRemapper>(Settings, RemapperClass);
+    const UVMCLiveLinkSettings* Proj = GetDefault<UVMCLiveLinkSettings>();
+    UClass* RemapperClass = (Proj && !Proj->DefaultRemapperClass.IsNull())
+        ? Proj->DefaultRemapperClass.LoadSynchronous()
+        : ULiveLinkAnimAndCurveRemapper::StaticClass();
 
-            // Optional: seed subclass with project default ref skeleton
-            if (ULiveLinkAnimAndCurveRemapper* My = Cast<ULiveLinkAnimAndCurveRemapper>(R))
-            {
-                if (Proj && !Proj->DefaultReferenceSkeleton.IsNull())
-                {
-                    My->ReferenceSkeleton = Proj->DefaultReferenceSkeleton;
-                }
-            }
+    NewSettings->Remapper = NewObject<ULiveLinkSubjectRemapper>(NewSettings, RemapperClass);
+    Preset.Settings = NewSettings;
 
-            Settings->Remapper = R;
-        }
-    }
+    // This creates the subject + settings in the client now (not “eventually”)
+    Client->CreateSubject(Preset);
+    Client->SetSubjectEnabled(Preset.Key, true);
 
     // 3) Warm caches and make sure we publish remapped names once
     RefreshStaticMapsFromSettings();
