@@ -1,11 +1,10 @@
 ﻿// LiveLinkAnimAndCurveRemapper.cpp - UE 5.6+
 
-#include "LiveLinkAnimAndCurveRemapper.h"
+#include "VMCLiveLinkRemapper.h"
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
-#include "RemapSync.h"
 #include <Remapper/LiveLinkSkeletonRemapper.h>
 #include <LiveLinkRemapAsset.h>
 
@@ -25,9 +24,9 @@ static void GetBoneNames(TSoftObjectPtr<USkeletalMesh> Mesh, TArray<FName>& Out)
 }
 
 // Qualify the return type to avoid “assumed int / different basic type”.
-ULiveLinkSubjectRemapper::FWorkerSharedPtr ULiveLinkAnimAndCurveRemapper::CreateWorker()
+ULiveLinkSubjectRemapper::FWorkerSharedPtr UVMCLiveLinkRemapper::CreateWorker()
 {
-	Worker = MakeShared<FLiveLinkAnimAndCurveRemapperWorker>();
+	Worker = MakeShared<FVMCLiveLinkRemapperWorker>();
 	Worker->BoneNameMap = BoneNameMap;     // base class map
 	Worker->CurveNameMap = CurveNameMap;    // our curve map
 	Worker->bEnableMetaHumanCurveNormalizer = bEnableMetaHumanCurveNormalizer;
@@ -36,7 +35,7 @@ ULiveLinkSubjectRemapper::FWorkerSharedPtr ULiveLinkAnimAndCurveRemapper::Create
 	return Worker;
 }
 
-void ULiveLinkAnimAndCurveRemapper::Initialize(const FLiveLinkSubjectKey& InSubjectKey)
+void UVMCLiveLinkRemapper::Initialize(const FLiveLinkSubjectKey& InSubjectKey)
 {
 	CachedKey = InSubjectKey;
 
@@ -65,14 +64,14 @@ void ULiveLinkAnimAndCurveRemapper::Initialize(const FLiveLinkSubjectKey& InSubj
 	RequestStaticDataRefresh(); // make it take effect now
 }
 
-void ULiveLinkAnimAndCurveRemapper::RequestStaticDataRefresh()
+void UVMCLiveLinkRemapper::RequestStaticDataRefresh()
 {
 	bDirty = true; // <-- force the remapper to rebuild mappings now
 	SyncWorker();
 }
 
 
-void ULiveLinkAnimAndCurveRemapper::SyncWorker() const
+void UVMCLiveLinkRemapper::SyncWorker() const
 {
 	if (!Worker.IsValid()) return;
 	Worker->BoneNameMap = BoneNameMap;
@@ -83,7 +82,7 @@ void ULiveLinkAnimAndCurveRemapper::SyncWorker() const
 	Worker->BlinkMirrorStrength = BlinkMirrorStrength;
 }
 
-void ULiveLinkAnimAndCurveRemapper::DetectAndSeedFromSubject()
+void UVMCLiveLinkRemapper::DetectAndSeedFromSubject()
 {
 	if (!IModularFeatures::Get().IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName)) return;
 
@@ -100,7 +99,7 @@ void ULiveLinkAnimAndCurveRemapper::DetectAndSeedFromSubject()
 	}
 }
 
-void ULiveLinkAnimAndCurveRemapper::ApplyPreset(ELLRemapPreset InPreset)
+void UVMCLiveLinkRemapper::ApplyPreset(ELLRemapPreset InPreset)
 {
 	switch (InPreset)
 	{
@@ -128,7 +127,7 @@ void ULiveLinkAnimAndCurveRemapper::ApplyPreset(ELLRemapPreset InPreset)
 	RequestStaticDataRefresh();
 }
 
-void ULiveLinkAnimAndCurveRemapper::LoadCustomCurveMapFromJSON(const FString& JsonText)
+void UVMCLiveLinkRemapper::LoadCustomCurveMapFromJSON(const FString& JsonText)
 {
 	TSharedPtr<FJsonObject> Root;
 	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonText);
@@ -161,7 +160,7 @@ void ULiveLinkAnimAndCurveRemapper::LoadCustomCurveMapFromJSON(const FString& Js
 
 // -------------- Seeding --------------
 
-void ULiveLinkAnimAndCurveRemapper::SeedCurves_ARKit()
+void UVMCLiveLinkRemapper::SeedCurves_ARKit()
 {
 	static const TCHAR* ARKit[] = {
 		TEXT("browDownLeft"), TEXT("browDownRight"), TEXT("browInnerUp"),
@@ -193,7 +192,7 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurves_ARKit()
 	}
 }
 
-void ULiveLinkAnimAndCurveRemapper::SeedCurvesAndBones_VRoid()
+void UVMCLiveLinkRemapper::SeedCurvesAndBones_VRoid()
 {
 	BoneNameMap.FindOrAdd("Hips")			= "J_Bip_C_Hips";
 	BoneNameMap.FindOrAdd("Spine")			= "J_Bip_C_Spine";
@@ -271,7 +270,7 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurvesAndBones_VRoid()
 	CurveNameMap.FindOrAdd("O") = "Face.M_F00_000_Fcl_MTH_O";
 }
 
-void ULiveLinkAnimAndCurveRemapper::SeedCurves_VMC_VRM()
+void UVMCLiveLinkRemapper::SeedCurves_VMC_VRM()
 {
 	// Common VMC/VRM → ARKit-ish targets. Expand to match your source.
 	CurveNameMap.FindOrAdd("Blink") = "eyeBlinkLeft"; // single blink → we’ll mirror in runtime
@@ -308,7 +307,7 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurves_VMC_VRM()
 
 
 
-void ULiveLinkAnimAndCurveRemapper::SeedCurves_Rokoko()
+void UVMCLiveLinkRemapper::SeedCurves_Rokoko()
 {
 	SeedCurves_ARKit(); // Rokoko typically forwards ARKit names
 	// Common alias fixes
@@ -316,7 +315,7 @@ void ULiveLinkAnimAndCurveRemapper::SeedCurves_Rokoko()
 	CurveNameMap.FindOrAdd("mouthSmile_R") = "mouthSmileRight";
 }
 
-void ULiveLinkAnimAndCurveRemapper::SeedBones_FromHumanoidLike(const TArray<FName>& Incoming)
+void UVMCLiveLinkRemapper::SeedBones_FromHumanoidLike(const TArray<FName>& Incoming)
 {
 	USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous();
 	if (!Ref) return;
@@ -381,14 +380,14 @@ void ULiveLinkAnimAndCurveRemapper::SeedBones_FromHumanoidLike(const TArray<FNam
 	}
 }
 
-void ULiveLinkAnimAndCurveRemapper::SeedFromReferenceSkeleton()
+void UVMCLiveLinkRemapper::SeedFromReferenceSkeleton()
 {
 
 
 
 }
 
-ELLRemapPreset ULiveLinkAnimAndCurveRemapper::GuessPreset(const TArray<FName>& BoneNames, const TArray<FName>& CurveNames) const
+ELLRemapPreset UVMCLiveLinkRemapper::GuessPreset(const TArray<FName>& BoneNames, const TArray<FName>& CurveNames) const
 {
 	
 	TArray<FName> RefSkelBoneNames;

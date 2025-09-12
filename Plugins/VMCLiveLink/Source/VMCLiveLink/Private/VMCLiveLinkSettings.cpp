@@ -1,5 +1,5 @@
 ﻿#include "VMCLiveLinkSettings.h"
-#include "LiveLinkAnimAndCurveRemapper.h"
+#include "VMCLiveLinkRemapper.h"
 
 UVMCLiveLinkSettings::UVMCLiveLinkSettings()
 {
@@ -8,5 +8,5 @@ UVMCLiveLinkSettings::UVMCLiveLinkSettings()
     SectionName = TEXT("VMC Live Link");
 
     // ✅ Set a default TYPE so the Project Settings field isn’t None
-    DefaultRemapperClass = ULiveLinkAnimAndCurveRemapper::StaticClass();
+    DefaultRemapperClass = UVMCLiveLinkRemapper::StaticClass();
 }

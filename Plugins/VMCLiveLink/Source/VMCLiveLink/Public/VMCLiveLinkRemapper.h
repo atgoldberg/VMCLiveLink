@@ -1,4 +1,4 @@
-﻿// LiveLinkAnimAndCurveRemapper.h - UE 5.6+
+﻿// VMCLiveLinkRemapper.h - UE 5.6+
 // Remaps bones + curves, optional MetaHuman value shaping, safe refresh (bDirty).
 
 #pragma once
@@ -11,8 +11,7 @@
 #include "Roles/LiveLinkAnimationRole.h"
 #include "Roles/LiveLinkAnimationTypes.h"
 #include "Engine/SkeletalMesh.h"
-#include "RemapSync.h"
-#include "LiveLinkAnimAndCurveRemapper.generated.h"
+#include "VMCLiveLinkRemapper.generated.h"
 
 UENUM(BlueprintType)
 enum class ELLRemapPreset : uint8
@@ -27,7 +26,7 @@ enum class ELLRemapPreset : uint8
 
 
 // ---------------- Worker ----------------
-class FLiveLinkAnimAndCurveRemapperWorker final : public ILiveLinkSubjectRemapperWorker
+class FVMCLiveLinkRemapperWorker final : public ILiveLinkSubjectRemapperWorker
 {
 public:
 	// Value shaping toggles (copied from asset on CreateWorker)
@@ -114,7 +113,7 @@ public:
 
 // ---------------- Asset ----------------
 UCLASS(MinimalAPI, EditInlineNew, DefaultToInstanced)
-class ULiveLinkAnimAndCurveRemapper final : public ULiveLinkSubjectRemapper
+class UVMCLiveLinkRemapper final : public ULiveLinkSubjectRemapper
 {
 	GENERATED_BODY()
 public:
@@ -183,12 +182,8 @@ private:
 	void SeedBones_FromHumanoidLike(const TArray<FName>& Incoming);
 
 	ELLRemapPreset GuessPreset(const TArray<FName>& BoneNames, const TArray<FName>& CurveNames) const;
-	void PublishMapsToSource()
-	{
-		VMCLiveLink_UpdateRemapMaps(CachedKey, BoneNameMap, CurveNameMap);
-	}
 
 private:
 	FLiveLinkSubjectKey CachedKey;
-	mutable TSharedPtr<FLiveLinkAnimAndCurveRemapperWorker> Worker;
+	mutable TSharedPtr<FVMCLiveLinkRemapperWorker> Worker;
 };

@@ -3,7 +3,7 @@
 #include "VMCLiveLinkSettings.generated.h"
 
 class ULiveLinkSubjectRemapper;
-class ULiveLinkAnimAndCurveRemapper;
+class UVMCLiveLinkRemapper;
 class USkeletalMesh;
 
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "VMC Live Link"))

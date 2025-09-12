@@ -6,12 +6,11 @@
 #include "LiveLinkTypes.h"
 #include "Roles/LiveLinkAnimationRole.h"
 #include "Roles/LiveLinkAnimationTypes.h"
-#include "RemapSync.h"
 
 #include "VMCLiveLinkSettings.h"
 #include "LiveLinkSubjectSettings.h"
 #include "LiveLinkSubjectRemapper.h"
-#include "LiveLinkAnimAndCurveRemapper.h"
+#include "VMCLiveLinkRemapper.h"
 #include "Async/Async.h"
 
 
@@ -169,9 +168,9 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
 
         // Unity -> UE5 Conversions
 
-        const float upx = px * 100.f;
-        const float upy = py * 100.f;
-        const float upz = pz * 100.f;
+        const float upx = -px * 100.f;
+        const float upy = pz * 100.f;
+        const float upz = py * 100.f;
 
         const float uqx = -qx;
         const float uqy = qz;
@@ -203,9 +202,9 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
             return;
 
         // Unity -> UE5 Conversions
-        const float upx = px * 100.f;
-        const float upy = py * 100.f;
-        const float upz = pz * 100.f;
+        const float upx = -px * 100.f;
+        const float upy = pz * 100.f;
+        const float upz = py * 100.f;
 
         const float uqx = -qx;
         const float uqy = qz;
@@ -410,7 +409,8 @@ void FVMCLiveLinkSource::PushFrame()
         if (LocalBoneParents.IsValidIndex(i) && LocalBoneParents[i] == -1)
         {
             // Root gets live root translation
-            X.SetTranslation(LocalRoot.GetTranslation());
+            const FTransform* In = LocalPose.Find(SrcName);
+            X.SetTranslation(In->GetTranslation());
         }
         else
         {
@@ -465,7 +465,7 @@ uint32 FVMCLiveLinkSource::HashMaps(const TMap<FName, FName>& A, const TMap<FNam
 
 void FVMCLiveLinkSource::RefreshStaticMapsIfNeeded()
 {
-    ULiveLinkAnimAndCurveRemapper* R = StaticNameRemapper.LoadSynchronous();
+    UVMCLiveLinkRemapper* R = StaticNameRemapper.LoadSynchronous();
     if (!R) return;
 
     const uint32 NewHash = HashMaps(R->BoneNameMap, R->CurveNameMap);
@@ -521,7 +521,7 @@ void FVMCLiveLinkSource::RefreshStaticMapsFromSettings()
     {
         NewBone = NowRemapper->BoneNameMap;
 
-        if (const ULiveLinkAnimAndCurveRemapper* My = Cast<ULiveLinkAnimAndCurveRemapper>(NowRemapper))
+        if (const UVMCLiveLinkRemapper* My = Cast<UVMCLiveLinkRemapper>(NowRemapper))
         {
             NewCurve = My->CurveNameMap;
             RefMesh = My->ReferenceSkeleton.LoadSynchronous();
@@ -574,7 +574,7 @@ void FVMCLiveLinkSource::EnsureSubjectSettingsWithDefaults()
     const UVMCLiveLinkSettings* Proj = GetDefault<UVMCLiveLinkSettings>();
     UClass* RemapperClass = (Proj && !Proj->DefaultRemapperClass.IsNull())
         ? Proj->DefaultRemapperClass.LoadSynchronous()
-        : ULiveLinkAnimAndCurveRemapper::StaticClass();
+        : UVMCLiveLinkRemapper::StaticClass();
 
     NewSettings->Remapper = NewObject<ULiveLinkSubjectRemapper>(NewSettings, RemapperClass);
     Preset.Settings = NewSettings;

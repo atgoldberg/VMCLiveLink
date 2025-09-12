@@ -12,7 +12,7 @@ struct FOSCMessage;
 
 class ULiveLinkSubjectRemapper;
 class ULiveLinkSubjectSettings;
-class ULiveLinkAnimAndCurveRemapper;
+class UVMCLiveLinkRemapper;
 
 /**
  * VMC → Live Link source (UE 5.6)
@@ -38,7 +38,7 @@ public:
     virtual FText GetSourceStatus() const override;
     // Optional: point this to the same remapper asset you use in Subject Settings (or a duplicate)
     UPROPERTY(EditAnywhere, Category = "Remap")
-    TSoftObjectPtr<ULiveLinkAnimAndCurveRemapper> StaticNameRemapper;
+    TSoftObjectPtr<UVMCLiveLinkRemapper> StaticNameRemapper;
 
 private:
     // OSC lifecycle
