@@ -1,0 +1,81 @@
+name: Fab Plugin Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_roots:
+        description: "Comma-separated UE roots (each has Engine/Build/BatchFiles/RunUAT.bat)"
+        required: true
+        default: "C:\\UE\\5.4,C:\\UE\\5.5,C:\\UE\\5.6"
+      engine_versions:
+        description: "Comma-separated versions matching roots (e.g., 5.4.0,5.5.0,5.6.0)"
+        required: true
+        default: "5.4.0,5.5.0,5.6.0"
+      plugin_dir:
+        description: "Path to plugin folder (contains *.uplugin). Relative paths OK."
+        required: true
+        default: "Plugins/VMCLiveLink"
+  push:
+    tags:
+      - "release/*"
+
+jobs:
+  build-windows:
+    runs-on: [self-hosted, Windows, X64]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Git LFS pull
+        run: |
+          git lfs install
+          git lfs fetch --all
+          git lfs pull
+
+      - name: Resolve inputs/vars
+        id: cfg
+        run: |
+          $pluginDir = "${{ github.event.inputs.plugin_dir }}"
+          if (-not $pluginDir) { $pluginDir = "Plugins/VMCLiveLink" }
+          $engineRoots = "${{ github.event.inputs.engine_roots }}"
+          if (-not $engineRoots) { $engineRoots = "C:\UE\5.4,C:\UE\5.5,C:\UE\5.6" }
+          $engineVers = "${{ github.event.inputs.engine_versions }}"
+          if (-not $engineVers) { $engineVers = "5.4.0,5.5.0,5.6.0" }
+          echo "plugin_dir=$pluginDir" >> $env:GITHUB_OUTPUT
+          echo "engine_roots=$engineRoots" >> $env:GITHUB_OUTPUT
+          echo "engine_versions=$engineVers" >> $env:GITHUB_OUTPUT
+
+      - name: Ensure scripts exist
+        run: |
+          if (-not (Test-Path "scripts\build_fab.ps1")) {
+            Write-Error "scripts\build_fab.ps1 not found. Commit the script to scripts/build_fab.ps1 or update the workflow path."
+          }
+          if (-not (Test-Path "scripts\add_copyright_headers.py")) {
+            Write-Error "scripts\add_copyright_headers.py not found. Commit the script to scripts/add_copyright_headers.py or update the workflow path."
+          }
+
+      - name: Verify copyright headers
+        run: |
+          $PluginDir  = "${{ steps.cfg.outputs.plugin_dir }}"
+          python "scripts\add_copyright_headers.py" $PluginDir --holder "Lifelike & Believable Animation Design, Inc." --verify
+
+      - name: Build Fab packages
+        run: |
+          $PluginDir  = "${{ steps.cfg.outputs.plugin_dir }}"
+          $OutputDir  = "$(Resolve-Path .)\FabBuilds"
+          New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+          $EngineRoots = "${{ steps.cfg.outputs.engine_roots }}".Split(",")
+          $EngineVers  = "${{ steps.cfg.outputs.engine_versions }}".Split(",")
+          ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FabZips
+          path: FabBuilds\*_Fab.zip
+          if-no-files-found: error

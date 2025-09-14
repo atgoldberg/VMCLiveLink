@@ -1,0 +1,76 @@
+name: Auto-fix Copyright Headers
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin_dir:
+        description: "Path to plugin folder (contains *.uplugin). Relative paths OK."
+        required: true
+        default: "Plugins/VMCLiveLink"
+      holder:
+        description: "Copyright holder text"
+        required: true
+        default: "Lifelike & Believable Animation Design, Inc."
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix-and-pr:
+    runs-on: [self-hosted, Windows, X64]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Ensure script exists
+        run: |
+          if (-not (Test-Path "scripts\add_copyright_headers.py")) {
+            Write-Error "scripts\add_copyright_headers.py not found. Commit it or update the path."
+          }
+
+      - name: Run header fixer
+        id: fix
+        run: |
+          $PluginDir = "${{ github.event.inputs.plugin_dir }}"
+          $Holder = "${{ github.event.inputs.holder }}"
+          python "scripts\add_copyright_headers.py" $PluginDir --holder "$Holder"
+          git status --porcelain > changes.txt
+          $changed = (Get-Content changes.txt).Trim().Length -gt 0
+          if ($changed) { echo "changed=true" >> $env:GITHUB_OUTPUT } else { echo "changed=false" >> $env:GITHUB_OUTPUT }
+
+      - name: Create branch and commit
+        if: steps.fix.outputs.changed == 'true'
+        run: |
+          $ts = Get-Date -Format "yyyyMMdd-HHmm"
+          $branch = "chore/headers-$ts"
+          git checkout -b $branch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: standardize copyright headers"
+          git push --set-upstream origin $branch
+          echo "branch=$branch" >> $env:GITHUB_OUTPUT
+
+      - name: Open pull request
+        if: steps.fix.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ steps.fix.outputs.branch }}
+          base: ${{ github.ref_name }}
+          title: "chore: standardize copyright headers"
+          body: |
+            This PR was created automatically by the **Auto-fix Copyright Headers** workflow.
+            - Plugin: `${{ github.event.inputs.plugin_dir }}`
+            - Holder: `${{ github.event.inputs.holder }}`
+
+      - name: No changes
+        if: steps.fix.outputs.changed != 'true'
+        run: echo "No header changes detected. Nothing to do."
