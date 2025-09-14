@@ -23,3 +23,30 @@ Whether you’re crafting an XR dance performance, streaming a VTuber show, or b
    git clone https://github.com/atgoldberg/VMCLiveLink.git
    cd VMCLiveLink
    git lfs pull
+
+## 🚀 Fab Plugin CI/CD
+
+This repository includes automated GitHub Actions to keep the plugin Fab-ready.
+
+### 🔎 Verify Build & Package
+[![Fab Plugin Builds](https://github.com/<your-org>/<your-repo>/actions/workflows/fab-plugin-build.yml/badge.svg)](https://github.com/<your-org>/<your-repo>/actions/workflows/fab-plugin-build.yml)
+
+Runs on tag push (`release/*`) or manually via **Actions → Fab Plugin Builds**:
+- Verifies all source files have a valid copyright header.
+- Builds the plugin for the specified Unreal Engine roots/versions.
+- Produces Fab-ready zips as downloadable artifacts.
+
+**Usage:**
+1. Go to **Actions → Fab Plugin Builds → Run workflow**.
+2. Fill in:
+   - `plugin_dir` → path to plugin folder (default: `Plugins/VMCLiveLink`)
+   - `engine_roots` → comma-separated UE roots (e.g. `C:\UE\5.4,C:\UE\5.5,C:\UE\5.6`)
+   - `engine_versions` → matching versions (e.g. `5.4.0,5.5.0,5.6.0`)
+
+### 🛠️ Auto-fix Headers
+[![Auto-fix Headers](https://github.com/<your-org>/<your-repo>/actions/workflows/header-autofix.yml/badge.svg)](https://github.com/<your-org>/<your-repo>/actions/workflows/header-autofix.yml)
+
+Ensures every `.h/.cpp` file starts with:
+
+```cpp
+// Copyright (c) YYYY Lifelike & Believable Animation Design, Inc. All Rights Reserved.
