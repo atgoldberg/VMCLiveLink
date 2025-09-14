@@ -1,3 +1,4 @@
+// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. / Athomas Goldberg. All Rights Reserved.
 ﻿#pragma once
 #include "Engine/DeveloperSettings.h"
 #include "VMCLiveLinkSettings.generated.h"

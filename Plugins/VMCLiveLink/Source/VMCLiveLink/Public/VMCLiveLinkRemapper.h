@@ -1,3 +1,4 @@
+// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. / Athomas Goldberg. All Rights Reserved.
 ﻿// VMCLiveLinkRemapper.h - UE 5.6+
 // Remaps bones + curves, optional MetaHuman value shaping, safe refresh (bDirty).
 
