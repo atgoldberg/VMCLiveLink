@@ -15,7 +15,7 @@ import re
 import datetime
 import sys
 
-HEADER_TEXT = "// Copyright (c) {years} Shocap Entertainment | Athomas Goldberg. All Rights Reserved."
+HEADER_TEXT = "// Copyright (c) {years} Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved."
 CURRENT_YEAR = datetime.date.today().year
 
 YEAR_RANGE_SPLIT_RE = re.compile(r"[–-]")  # hyphen or en dash
