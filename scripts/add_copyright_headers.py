@@ -6,7 +6,7 @@ If missing, add it. If present, update year range to include current year.
 
 import os, re, datetime, sys
 
-HEADER_TEMPLATE = "// Copyright (c) {years} Shocap Entertainment / Athomas Goldberg. All Rights Reserved.\n"
+HEADER_TEMPLATE = "// Copyright (c) {years} Shocap Entertainment | Athomas Goldberg. All Rights Reserved.\n"
 CURRENT_YEAR = datetime.date.today().year
 
 def process_file(path):
