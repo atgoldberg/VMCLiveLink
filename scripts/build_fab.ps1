@@ -55,7 +55,12 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   $txt = Get-Content -Raw -Path $jsonPath
   # Remove comments crudely
   $txt2 = $txt -replace '(?m)//.*', ''
-  $txt2 = [System.Text.RegularExpressions.Regex]::Replace($txt2, '/\*.*?\*/', '', 'Singleline')
+  $txt2 = [System.Text.RegularExpressions.Regex]::Replace(
+    $txt2,
+    '/\*.*?\*/',
+    '',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline
+  )
   $data = $null
   try { $data = $txt2 | ConvertFrom-Json -ErrorAction Stop } catch { $data = $null }
   if ($null -ne $data) {
@@ -70,9 +75,15 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   } else {
     # Text patch fallback
     if ($txt -match '"EngineVersion"\s*:') {
-      $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, '("EngineVersion"\s*:\s*")[^"]*(")', "`$1$engineVersion`$2", 1)
+      # Replace EngineVersion value (case-insensitive)
+      $txt = [System.Text.RegularExpressions.Regex]::Replace(
+        $txt,
+        '("EngineVersion"\s*:\s*")[^"]*(")',
+        "`$1$engineVersion`$2"
+      )
     } else {
-      $txt = $txt -replace '\{', "{`n  `"EngineVersion`": `"$engineVersion`"," , 1
+      # Insert EngineVersion after the opening brace only (anchor to start)
+      $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
     }
     Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
   }
@@ -83,7 +94,7 @@ for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
   $ver = $EngineVersions[$i]
   $uat = Join-Path $root "Engine\Build\BatchFiles\RunUAT.bat"
   if (-not (Test-Path $uat)) { Fail "RunUAT not found at $uat" }
-
+  
   $stage = Join-Path $OutputDir "$pluginName-UE$($ver.Replace('.','_'))-Stage"
   if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
   New-Item -ItemType Directory -Path $stage | Out-Null
@@ -98,7 +109,7 @@ for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
   # BuildPlugin with UAT (outputs to a packaged folder without Intermediate/Binaries by default)
   $packageDir = Join-Path $OutputDir "$pluginName-UE$($ver.Replace('.','_'))-Packaged"
   if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
-  & "$uat" BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -StrictIncludes
+  & $uat BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -StrictIncludes
   if ($LASTEXITCODE -ne 0) { Fail "BuildPlugin failed for UE $ver" }
 
   # Zip
