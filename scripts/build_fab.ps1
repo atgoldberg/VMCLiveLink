@@ -116,7 +116,7 @@ for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
   # BuildPlugin with UAT (outputs to a packaged folder without Intermediate/Binaries by default)
   $packageDir = Join-Path $OutputDir "$pluginName-UE$($ver.Replace('.','_'))-Packaged"
   if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
-  & $uat BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -StrictIncludes -VeryVerbose
+  & $uat BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -VeryVerbose
   if ($LASTEXITCODE -ne 0) { Fail "BuildPlugin failed for UE $ver" }
 
   # Zip
