@@ -1,5 +1,4 @@
-// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. / Athomas Goldberg. All Rights Reserved.
-﻿#include "VMCLiveLinkSourceFactory.h"
+#include "VMCLiveLinkSourceFactory.h"
 #include "VMCLiveLinkSource.h"
 
 #include "Widgets/SBoxPanel.h"

@@ -1,6 +1,4 @@
-// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. / Athomas Goldberg. All Rights Reserved.
-﻿// LiveLinkAnimAndCurveRemapper.cpp - UE 5.6+
-
+// copyright 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg All rights reserved.
 #include "VMCLiveLinkRemapper.h"
 
 #include "Dom/JsonObject.h"

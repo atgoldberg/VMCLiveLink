@@ -14,10 +14,6 @@
 		{
 			"Name": "LiveLinkCurveDebugUI",
 			"Enabled": true
-		},
-		{
-			"Name": "VRM4U",
-			"Enabled": true
 		}
 	]
 }

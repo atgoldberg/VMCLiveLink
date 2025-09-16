@@ -1,5 +1,5 @@
-// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. / Athomas Goldberg. All Rights Reserved.
-﻿#include "VMCLiveLinkSource.h"
+// copyright 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg All rights reserved.
+#include "VMCLiveLinkSource.h"
 #include "VMCLog.h"
 
 // Live Link
