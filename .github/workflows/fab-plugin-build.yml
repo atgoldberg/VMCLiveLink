@@ -73,7 +73,7 @@ jobs:
           $PluginDir  = "${{ steps.cfg.outputs.plugin_dir }}"
           $OutputDir  = "$(Resolve-Path .)\FabBuilds"
           New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-          $EngineRoots = ${{ steps.cfg.outputs.engine_roots }}.Split(",")
+          $EngineRoots = '${{ steps.cfg.outputs.engine_roots }}.Split(",")'
           $EngineVers  = "${{ steps.cfg.outputs.engine_versions }}".Split(",")
           ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
 
