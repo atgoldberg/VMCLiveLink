@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Shocap Entertainment | Athomas Goldberg. All Rights Reserved.
+// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
 #include "VMCLiveLinkSettings.h"
 #include "VMCLiveLinkRemapper.h"
 

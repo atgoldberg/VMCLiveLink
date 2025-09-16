@@ -2,7 +2,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-// copyright 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg All rights reserved.
+// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
 #include "ILiveLinkSource.h"
 #include "HAL/CriticalSection.h"
 #include "UObject/StrongObjectPtr.h"
