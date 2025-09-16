@@ -55,7 +55,12 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   $txt = Get-Content -Raw -Path $jsonPath
   # Remove comments crudely
   $txt2 = $txt -replace '(?m)//.*', ''
-  $txt2 = [System.Text.RegularExpressions.Regex]::Replace($txt2, '/\*.*?\*/', '', 'Singleline')
+  $txt2 = [System.Text.RegularExpressions.Regex]::Replace(
+    $txt2,
+    '/\*.*?\*/',
+    '',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline
+  )
   $data = $null
   try { $data = $txt2 | ConvertFrom-Json -ErrorAction Stop } catch { $data = $null }
   if ($null -ne $data) {
@@ -70,9 +75,15 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   } else {
     # Text patch fallback
     if ($txt -match '"EngineVersion"\s*:') {
-      $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, '("EngineVersion"\s*:\s*")[^"]*(")', "`$1$engineVersion`$2", 1)
+      # Replace EngineVersion value (case-insensitive)
+      $txt = [System.Text.RegularExpressions.Regex]::Replace(
+        $txt,
+        '("EngineVersion"\s*:\s*")[^"]*(")',
+        "`$1$engineVersion`$2"
+      )
     } else {
-      $txt = $txt -replace '\{', "{`n  `"EngineVersion`": `"$engineVersion`"," , 1
+      # Insert EngineVersion after the opening brace only (anchor to start)
+      $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
     }
     Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
   }
