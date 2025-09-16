@@ -82,8 +82,8 @@ for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
   $root = (Resolve-Path $EngineRoots[$i]).Path
   $ver = $EngineVersions[$i]
   $uat = Join-Path $root "Engine\Build\BatchFiles\RunUAT.bat"
-  if (-not (Test-Path $uat)) { Fail "RunUAT not found at $uat" }
-
+  if (-not (Test-Path $uat)) { Fail "RunUAT not found at $uat" } }
+  
   $stage = Join-Path $OutputDir "$pluginName-UE$($ver.Replace('.','_'))-Stage"
   if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
   New-Item -ItemType Directory -Path $stage | Out-Null
