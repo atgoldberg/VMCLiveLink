@@ -1,3 +1,4 @@
+// Copyright (c) 2025 Shocap Entertainment | Athomas Goldberg. All Rights Reserved.
 #include "VMCLiveLinkSettings.h"
 #include "VMCLiveLinkRemapper.h"
 
