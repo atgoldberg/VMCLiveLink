@@ -30,7 +30,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
-
+          
+      - name: Set PowerShell Execution Policy
+        run: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
+        shell: powershell
+        
       - name: Git LFS pull
         run: |
           git lfs install
