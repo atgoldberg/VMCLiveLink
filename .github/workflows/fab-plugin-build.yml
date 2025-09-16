@@ -14,8 +14,8 @@ jobs:
         shell: powershell
     env:
       PLUGIN_DIR: "Plugins/VMCLiveLink"
-      ENGINE_ROOTS: 'C:\\Program Files\\Epic Games\\UE_5.4,C:\\Program Files\\Epic Games\\UE_5.5,C:\\Program Files\\Epic Games\\UE_5.6'
-      ENGINE_VERSIONS: '5.4.0,5.5.0,5.6.0'
+      ENGINE_ROOTS: 'C:\\Program Files\\Epic Games\\UE_5.6'
+      ENGINE_VERSIONS: '5.6.0'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
