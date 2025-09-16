@@ -71,8 +71,8 @@ jobs:
           $PluginDir  = "${{ steps.cfg.outputs.plugin_dir }}"
           $OutputDir  = "$(Resolve-Path .)\FabBuilds"
           New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-          $engineRoots = '"C:\Program Files\Epic Games\UE_5.4","C:\Program Files\Epic Games\UE_5.5","C:\Program Files\Epic Games\UE_5.6"'.Split(",")
-          $engineVers = "5.4.0,5.5.0,5.6.0".Split(",")
+          $EngineRoots = '"C:\Program Files\Epic Games\UE_5.4","C:\Program Files\Epic Games\UE_5.5","C:\Program Files\Epic Games\UE_5.6"'.Split(",")
+          $EngineVers = "5.4.0,5.5.0,5.6.0".Split(",")
           ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
 
       - name: Upload artifacts
