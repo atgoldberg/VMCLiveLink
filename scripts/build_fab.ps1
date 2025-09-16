@@ -39,8 +39,15 @@ if ($EngineRoots.Count -ne $EngineVersions.Count) {
 }
 
 $PluginDir = (Resolve-Path $PluginDir).Path
-$OutputDir = (Resolve-Path $OutputDir -ErrorAction SilentlyContinue)
-if (-not $OutputDir) { $null = New-Item -ItemType Directory -Path $OutputDir -Force; $OutputDir = (Resolve-Path $OutputDir).Path }
+
+
+$OutputDirRaw = $OutputDir
+$resolved = Resolve-Path -LiteralPath $OutputDirRaw -ErrorAction SilentlyContinue
+if ($null -eq $resolved) {
+  New-Item -ItemType Directory -Path $OutputDirRaw -Force | Out-Null
+  $resolved = Resolve-Path -LiteralPath $OutputDirRaw
+}
+$OutputDir = $resolved.Path
 
 $uplugin = Get-ChildItem -Path $PluginDir -Filter *.uplugin -Recurse | Select-Object -First 1
 if (-not $uplugin) { Fail "No .uplugin found under $PluginDir" }
@@ -109,7 +116,7 @@ for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
   # BuildPlugin with UAT (outputs to a packaged folder without Intermediate/Binaries by default)
   $packageDir = Join-Path $OutputDir "$pluginName-UE$($ver.Replace('.','_'))-Packaged"
   if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
-  & $uat BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -StrictIncludes
+  & $uat BuildPlugin -Plugin="$($stageUPlugin.FullName)" -Package="$packageDir" -Rocket -StrictIncludes -VeryVerbose
   if ($LASTEXITCODE -ne 0) { Fail "BuildPlugin failed for UE $ver" }
 
   # Zip
