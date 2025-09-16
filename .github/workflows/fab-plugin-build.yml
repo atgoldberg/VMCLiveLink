@@ -6,6 +6,10 @@ on:
       - "release/*"
   workflow_dispatch:
 
+# Need write access to repository contents to create releases and upload assets.
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: [self-hosted, Windows, X64]
@@ -58,9 +62,58 @@ jobs:
 
           ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
 
-      - name: Upload artifacts
+      - name: Prepare single VMCLiveLink.zip
+        run: |
+          $OutputDir = "$(Resolve-Path .)\FabBuilds"
+          $ZipFiles = Get-ChildItem -Path $OutputDir -Filter '*_Fab.zip' -File -ErrorAction SilentlyContinue
+
+          if (-not $ZipFiles -or $ZipFiles.Count -eq 0) {
+            Write-Error "No Fab zip files found in $OutputDir"
+            exit 1
+          }
+
+          $FinalZip = Join-Path $OutputDir 'VMCLiveLink.zip'
+
+          if ($ZipFiles.Count -eq 1) {
+            Copy-Item -Path $ZipFiles[0].FullName -Destination $FinalZip -Force
+          } else {
+            # Merge multiple Fab zips into a single zip by extracting and recompressing.
+            $TempDir = Join-Path $env:TEMP ('fabzip_' + [Guid]::NewGuid().ToString())
+            New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+            foreach ($z in $ZipFiles) {
+              Expand-Archive -Path $z.FullName -DestinationPath $TempDir -Force
+            }
+
+            if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
+
+            # Compress-Archive expects a wildcard to include contents of temp dir
+            Compress-Archive -Path (Join-Path $TempDir '*') -DestinationPath $FinalZip -Force
+
+            Remove-Item -Path $TempDir -Recurse -Force
+          }
+
+      - name: Upload artifact (single zip)
         uses: actions/upload-artifact@v4
         with:
-          name: FabZips
-          path: FabBuilds\*_Fab.zip
+          name: VMCLiveLink
+          path: FabBuilds\VMCLiveLink.zip
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          body: "Automated release created by CI for ${{ github.ref_name }}."
+          draft: false
+          prerelease: false
+
+      - name: Upload release asset (VMCLiveLink.zip)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: FabBuilds\VMCLiveLink.zip
+          asset_name: VMCLiveLink.zip
+          asset_content_type: application/zip
