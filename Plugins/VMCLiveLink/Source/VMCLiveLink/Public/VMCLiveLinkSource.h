@@ -1,8 +1,6 @@
-// Copyright (c) 2025 Shocap Entertainment | Athomas Goldberg. All Rights Reserved.
-#pragma once
+// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.#pragma once
 
 #include "CoreMinimal.h"
-// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
 #include "ILiveLinkSource.h"
 #include "HAL/CriticalSection.h"
 #include "UObject/StrongObjectPtr.h"
