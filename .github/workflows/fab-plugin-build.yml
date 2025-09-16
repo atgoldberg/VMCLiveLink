@@ -46,10 +46,8 @@ jobs:
         run: |
           $pluginDir = "${{ github.event.inputs.plugin_dir }}"
           if (-not $pluginDir) { $pluginDir = "Plugins/VMCLiveLink" }
-          $engineRoots = ${{ github.event.inputs.engine_roots }}
-          if (-not $engineRoots) { $engineRoots = "C:\UE\5.4,C:\UE\5.5,C:\UE\5.6" }
-          $engineVers = "${{ github.event.inputs.engine_versions }}"
-          if (-not $engineVers) { $engineVers = "5.4.0,5.5.0,5.6.0" }
+          $engineRoots = '"C:\Program Files\Epic Games\UE_5.4","C:\Program Files\Epic Games\UE_5.5","C:\Program Files\Epic Games\UE_5.6"'
+          $engineVers = "5.4.0,5.5.0,5.6.0"
           echo "plugin_dir=$pluginDir" >> $env:GITHUB_OUTPUT
           echo "engine_roots=$engineRoots" >> $env:GITHUB_OUTPUT
           echo "engine_versions=$engineVers" >> $env:GITHUB_OUTPUT
