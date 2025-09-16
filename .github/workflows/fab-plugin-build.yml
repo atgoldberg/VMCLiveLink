@@ -32,7 +32,7 @@ jobs:
           lfs: true
           
       - name: Set PowerShell Execution Policy
-        run: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
+        run: Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
         shell: powershell
         
       - name: Git LFS pull
