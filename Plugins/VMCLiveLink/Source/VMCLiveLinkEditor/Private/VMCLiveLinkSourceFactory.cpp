@@ -92,7 +92,6 @@ TSharedPtr<ILiveLinkSource> UVMCLiveLinkSourceFactory::CreateSource(const FStrin
     const bool MetersToCm = ParseMetersToCm(ConnectionString, true);
     const FString Subject = ParseSubject(ConnectionString, "VMC_Subject");
 
-    // Two-arg ctor is exported now (VMCLIVELINK_API on class)
     return MakeShared<FVMCLiveLinkSource>(TEXT("VMC"), Port, UnityToUnreal, MetersToCm, 0, Subject);
 }
 
@@ -101,7 +100,19 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
     struct FState { int32 Port = 39539; bool bUnityToUE = true; bool bMetersToCm = true; FString SubjectName = FString("VMC_Subject"); };
 
     TSharedRef<FState> State = MakeShared<FState>();
-    TSharedPtr<SEditableTextBox> InputTextBox;
+
+    // Helper used by both Enter key and Create button
+    auto CreateAndNotify = [OnCreated, State]()
+    {
+        const FString Conn = FString::Printf(TEXT("port=%d;unity2ue=%d;meters2cm=%d;subject=%s"),
+            State->Port, State->bUnityToUE ? 1 : 0, State->bMetersToCm ? 1 : 0, *State->SubjectName);
+
+        const TSharedPtr<ILiveLinkSource> Src = MakeShared<FVMCLiveLinkSource>(TEXT("VMC"), State->Port, State->bUnityToUE, State->bMetersToCm, 0.0f, State->SubjectName);
+        if (OnCreated.IsBound())
+        {
+            OnCreated.Execute(Src, Conn);
+        }
+    };
 
     return SNew(SVerticalBox)
         + SVerticalBox::Slot().AutoHeight().Padding(4)
@@ -121,20 +132,29 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                         .OnValueChanged_Lambda([State](int32 V) { State->Port = V; })
                 ]
         ]
-    + SVerticalBox::Slot().AutoHeight().Padding(4)
+        + SVerticalBox::Slot().AutoHeight().Padding(4)
         [
             SNew(SHorizontalBox)
                 + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
                 [SNew(STextBlock).Text(NSLOCTEXT("VMCLiveLink", "Subject", "Subject Name"))]
                 + SHorizontalBox::Slot().AutoWidth()
                 [
-                    SAssignNew(InputTextBox, SEditableTextBox)
+                    SNew(SEditableTextBox)
                         .HintText(NSLOCTEXT("MySource", "InputHint", "Enter subject name..."))
-                        .Text_Lambda([State] { return FText().FromString(State->SubjectName); })
-                        .OnTextCommitted_Lambda([State](const FText& Text, ETextCommit::Type CommitType) { State->SubjectName = Text.ToString(); } )
+                        .ClearKeyboardFocusOnCommit(false) // optional: avoid focus loss committing closing parent UI
+                        .Text_Lambda([State] { return FText::FromString(State->SubjectName); })
+                        .OnTextChanged_Lambda([State](const FText& Text) { State->SubjectName = Text.ToString(); })
+                        .OnTextCommitted_Lambda([State, CreateAndNotify](const FText& Text, ETextCommit::Type CommitType)
+                        {
+                            State->SubjectName = Text.ToString();
+                            if (CommitType == ETextCommit::OnEnter)
+                            {
+                                CreateAndNotify();
+                            }
+                        })
                 ]
         ]
-    + SVerticalBox::Slot().AutoHeight().Padding(4)
+        + SVerticalBox::Slot().AutoHeight().Padding(4)
         [
             SNew(SHorizontalBox)
                 + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 16, 0)
@@ -152,24 +172,18 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                         [SNew(STextBlock).Text(NSLOCTEXT("VMCLiveLink", "MetersToCm", "Meters→cm"))]
                 ]
         ]
-    + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(4)
+        + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right).Padding(4)
         [
             SNew(SUniformGridPanel).SlotPadding(FMargin(4))
                 + SUniformGridPanel::Slot(0, 0)
                 [
                     SNew(SButton)
                         .Text(NSLOCTEXT("VMCLiveLink", "Create", "Create"))
-                        .OnClicked_Lambda([OnCreated, State]()
-                            {
-                                const FString Conn = FString::Printf(TEXT("port=%d;unity2ue=%d;meters2cm=%d;subject=%s"),
-                                    State->Port, State->bUnityToUE ? 1 : 0, State->bMetersToCm ? 1 : 0, *State->SubjectName);
-                                const TSharedPtr<ILiveLinkSource> Src = MakeShared<FVMCLiveLinkSource>(TEXT("VMC"), State->Port, State->bUnityToUE, State->bMetersToCm, 0.0f, State->SubjectName);
-                                if (OnCreated.IsBound())
-                                {
-                                    OnCreated.Execute(Src, Conn);
-                                }
-                                return FReply::Handled();
-                            })
+                        .OnClicked_Lambda([CreateAndNotify]()
+                        {
+                            CreateAndNotify();
+                            return FReply::Handled();
+                        })
                 ]
         ];
 }
