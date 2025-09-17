@@ -92,7 +92,6 @@ TSharedPtr<ILiveLinkSource> UVMCLiveLinkSourceFactory::CreateSource(const FStrin
     const bool MetersToCm = ParseMetersToCm(ConnectionString, true);
     const FString Subject = ParseSubject(ConnectionString, "VMC_Subject");
 
-    // Two-arg ctor is exported now (VMCLIVELINK_API on class)
     return MakeShared<FVMCLiveLinkSource>(TEXT("VMC"), Port, UnityToUnreal, MetersToCm, 0, Subject);
 }
 
@@ -130,7 +129,7 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                 [
                     SAssignNew(InputTextBox, SEditableTextBox)
                         .HintText(NSLOCTEXT("MySource", "InputHint", "Enter subject name..."))
-                        .Text_Lambda([State] { return FText().FromString(State->SubjectName); })
+                        .Text_Lambda([State] { return FText::FromString(State->SubjectName); })
                         .OnTextCommitted_Lambda([State](const FText& Text, ETextCommit::Type CommitType) { State->SubjectName = Text.ToString(); } )
                 ]
         ]
