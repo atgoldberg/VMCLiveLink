@@ -14,7 +14,6 @@
 #include "VMCLiveLinkRemapper.h"
 #include "Async/Async.h"
 
-
 // OSC (cpp-only)
 #include "OSCServer.h"
 #include "OSCMessage.h"
@@ -22,6 +21,7 @@
 
 // Math
 #include "Math/RotationMatrix.h"
+#include "Engine/SkeletalMesh.h" // for BuildRefOffsetsFromMesh
 
 // ---------------- Utils: OSC argument reading (UE5.6) ----------------
 
@@ -53,6 +53,22 @@ static bool ReadFloat7(const FOSCMessage& Msg,
     qw = A[6].GetFloat();
     
     return true;
+}
+
+// Helpers for basis/unit conversion (Unity → UE)
+static FVector ToUEPosition(bool bUnityToUE, bool bMetersToCm, float px, float py, float pz)
+{
+    FVector P = bUnityToUE ? FVector(-px, pz, py) : FVector(px, py, pz);
+    if (bMetersToCm) P *= 100.f;
+    return P;
+}
+
+static FQuat ToUERotation(bool bUnityToUE, float qx, float qy, float qz, float qw)
+{
+    const FQuat Q = bUnityToUE ? FQuat(-qx, qz, qy, qw) : FQuat(qx, qy, qz, qw);
+    FQuat N = Q;
+    N.Normalize();
+    return N;
 }
 
 // ---------------- Ctors & status ----------------
@@ -151,8 +167,6 @@ void FVMCLiveLinkSource::StopOSC()
     }
 }
 
-
-
 // ---------------- OSC message handler ----------------
 
 void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FString& FromIP, uint16 FromPort)
@@ -167,21 +181,8 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
 
         const FName BoneName(*Bone);
 
-        // Unity -> UE5 Conversions
-
-        const float upx = -px * 100.f;
-        const float upy = pz * 100.f;
-        const float upz = py * 100.f;
-
-        const float uqx = -qx;
-        const float uqy = qz;
-        const float uqz = qy;
-        const float uqw = qw;
-
-        FVector P = bUnityToUE ? FVector(upx, upy, upz)
-            : FVector(px, py, pz);
-        FQuat   Q = bUnityToUE ? FQuat(uqx, uqy, uqz, uqw)
-            : FQuat(qx, qy, qz, qw);
+        FVector P = ToUEPosition(bUnityToUE, bMetersToCm, px, py, pz);
+        FQuat   Q = ToUERotation(bUnityToUE, qx, qy, qz, qw);
 
         const FTransform Xf(Q, P, FVector(1));
 
@@ -193,6 +194,8 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
             if (BoneName == FName("root")) Parent = -1;
             BoneNames.Add(BoneName);
             BoneParents.Add(Parent);
+            bStaticSent = false;          // ensure we republish new skeleton
+            bForceStaticNext = true;
         }
         PendingPose.Add(BoneName, Xf);
     }
@@ -202,20 +205,16 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
         if (!ReadFloat7(Msg, px, py, pz, qx, qy, qz, qw))
             return;
 
-        // Unity -> UE5 Conversions
-        const float upx = -px * 100.f;
-        const float upy = pz * 100.f;
-        const float upz = py * 100.f;
+        FVector PR = ToUEPosition(bUnityToUE, bMetersToCm, px, py, pz);
+        FQuat   QR = ToUERotation(bUnityToUE, qx, qy, qz, qw);
 
-        const float uqx = -qx;
-        const float uqy = qz;
-        const float uqz = qy;
-        const float uqw = qw;
-
-        FVector PR = bUnityToUE ? FVector(upx, upy, upz)
-            : FVector(px, py, pz);
-        FQuat   QR = bUnityToUE ? FQuat(uqx, uqy, uqz, uqw)
-            : FQuat(qx, qy, qz, qw);
+        // Apply extra yaw offset about UE Z
+        if (!FMath::IsNearlyZero(YawOffsetDeg))
+        {
+            const FQuat YawDelta(FVector::UpVector, FMath::DegreesToRadians(YawOffsetDeg));
+            QR = YawDelta * QR;
+            PR = YawDelta.RotateVector(PR);
+        }
 
         {
             FScopeLock Lock(&DataGuard);
@@ -226,6 +225,8 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
             {
                 BoneNames.Insert(FName("root"), 0);
                 BoneParents.Insert(-1, 0);
+                bStaticSent = false;
+                bForceStaticNext = true;
             }
         }
     }
@@ -250,23 +251,19 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
     {
         AsyncTask(ENamedThreads::GameThread, [this]()
         {
-            // If we haven’t yet attached defaults, do it now.
             if (!bEnsuredDefaults)
             {
                 EnsureSubjectSettingsWithDefaults();
             }
         });
-        // Pull latest maps from the subject settings the preset applied
         RefreshStaticMapsFromSettings();
 
-        // If we just attached or maps changed, republish static once
-        if (bForceStaticNext)
+        if (bForceStaticNext || !bStaticSent)
         {
             bForceStaticNext = false;
             PushStaticData(/*bForce=*/true);
         }
 
-        // Existing flow
         PushStaticData(/*bForce=*/false);
         PushFrame();
 
@@ -279,7 +276,6 @@ void FVMCLiveLinkSource::OnOscMessageReceived(const FOSCMessage& Msg, const FStr
             PushStaticData(/*bForce=*/true);
         }
     }
-
 }
 
 // ---------------- Live Link data push ----------------
@@ -295,27 +291,12 @@ void FVMCLiveLinkSource::PushStaticData(bool bForce)
     }
 
     // Make editable copies
-// Make editable copies
     TArray<FName> OutBoneNames = BoneNames;
     TArray<FName> OutCurveNames = CurveNamesOrdered;
 
     // Apply cached maps (preserve order → indices remain valid)
     for (FName& N : OutBoneNames)  if (const FName* M = CachedBoneMap.Find(N))  N = *M;
     for (FName& C : OutCurveNames) if (const FName* M = CachedCurveMap.Find(C)) C = *M;
-
-    // Build/push StaticData as you already do (bones, parents, PropertyNames)
-
-    // Apply cached maps (order preserved → indices stay valid)
-    if (CachedBoneMap.Num() > 0)
-    {
-        for (FName& N : OutBoneNames)
-            if (const FName* M = CachedBoneMap.Find(N)) N = *M;
-    }
-    if (CachedCurveMap.Num() > 0)
-    {
-        for (FName& C : OutCurveNames)
-            if (const FName* M = CachedCurveMap.Find(C)) C = *M;
-    }
 
     // Build static packet
     FLiveLinkStaticDataStruct StaticData(FLiveLinkSkeletonStaticData::StaticStruct());
@@ -327,14 +308,11 @@ void FVMCLiveLinkSource::PushStaticData(bool bForce)
     // UE 5.6: curve names live on the base static data array
     Skel.PropertyNames = OutCurveNames;
 
-
-
     Client->PushSubjectStaticData_AnyThread({ SourceGuid, SubjectName },
         ULiveLinkAnimationRole::StaticClass(), MoveTemp(StaticData));
 
     bStaticSent = true;
 }
-
 
 void FVMCLiveLinkSource::PushFrame()
 {
@@ -346,10 +324,9 @@ void FVMCLiveLinkSource::PushFrame()
     TMap<FName, FTransform>  LocalPose;
     FTransform               LocalRoot = FTransform::Identity;
     TArray<FName>            LocalCurveNames;
-    TMap<FName, int32>        LocalCurveNameToIndex;
-    TMap<FName, float>        LocalCurves;
+    TMap<FName, int32>       LocalCurveNameToIndex;
+    TMap<FName, float>       LocalCurves;
 
-    // Optional helpers (added earlier in this thread)
     TMap<FName, FName>       LocalBoneMap;                 // source → mapped
     TMap<FName, FVector>     LocalRefOffsets;              // mapped name → ref local translation
     bool                     bLocalUseRefOffsets = true;
@@ -366,7 +343,6 @@ void FVMCLiveLinkSource::PushFrame()
         LocalCurveNameToIndex = CurveNameToIndex;
         LocalCurves = PendingCurves;
 
-        // if you added these members (recommended), we pull them
         LocalBoneMap = CachedBoneMap;
         LocalRefOffsets = RefLocalTranslationByName;
         bLocalUseRefOffsets = bUseRefOffsets;
@@ -415,7 +391,17 @@ void FVMCLiveLinkSource::PushFrame()
         }
         else
         {
-            // Non-root: use ref-pose local offsets unless we truly trust incoming translations
+            // Rotation from incoming stream (if present)
+            if (const FTransform* In = LocalPose.Find(SrcName))
+            {
+                X.SetRotation(In->GetRotation());
+                if (bLocalPreferIncoming)
+                {
+                    X.SetTranslation(In->GetTranslation());
+                }
+            }
+
+            // Translation handling
             if (!bLocalPreferIncoming || X.GetTranslation().IsNearlyZero())
             {
                 if (bLocalUseRefOffsets && bLocalHaveRefOffsets)
@@ -447,7 +433,6 @@ void FVMCLiveLinkSource::PushFrame()
 
     Client->PushSubjectFrameData_AnyThread({ SourceGuid, SubjectName }, MoveTemp(Frame));
 }
-
 
 uint32 FVMCLiveLinkSource::HashMaps(const TMap<FName, FName>& A, const TMap<FName, FName>& B)
 {
@@ -529,10 +514,7 @@ void FVMCLiveLinkSource::RefreshStaticMapsFromSettings()
         }
     }
 
-    //  - Rebuild offsets if:
-    //  - mesh changed
-    //  - or we never built them
-    //  - or our cache looks incomplete vs the mesh
+    //  - Rebuild offsets if mesh changed or cache invalid
     const bool bMeshChanged = (LastRefMeshBuiltFrom.Get() != RefMesh);
     const bool bNeverBuilt = !bHaveRefOffsets || RefLocalTranslationByName.Num() == 0;
     const bool bCountMismatch = RefMesh && (RefLocalTranslationByName.Num() != RefMesh->GetRefSkeleton().GetNum());
@@ -541,7 +523,6 @@ void FVMCLiveLinkSource::RefreshStaticMapsFromSettings()
     {
         BuildRefOffsetsFromMesh(RefMesh);
         LastRefMeshBuiltFrom = RefMesh;
-        // No need to force static here; offsets affect frames, not names.
     }
 
     const uint32 NewHash = HashMaps(NewBone, NewCurve);
@@ -563,8 +544,7 @@ void FVMCLiveLinkSource::EnsureSubjectSettingsWithDefaults()
 
     const FLiveLinkSubjectKey Key{ SourceGuid, SubjectName };
 
-    // 1) Bootstrap the subject settings if they don't exist yet.
-
+    // Bootstrap the subject settings if they don't exist yet.
     FLiveLinkSubjectPreset Preset;
     Preset.Key = FLiveLinkSubjectKey{ SourceGuid, SubjectName };
     Preset.Role = ULiveLinkAnimationRole::StaticClass();

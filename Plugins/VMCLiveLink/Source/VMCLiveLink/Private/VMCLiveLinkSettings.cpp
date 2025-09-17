@@ -1,6 +1,7 @@
 // Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
 #include "VMCLiveLinkSettings.h"
 #include "VMCLiveLinkRemapper.h"
+#include "Engine/SkeletalMesh.h"
 
 UVMCLiveLinkSettings::UVMCLiveLinkSettings()
 {
@@ -8,6 +9,7 @@ UVMCLiveLinkSettings::UVMCLiveLinkSettings()
     CategoryName = TEXT("Plugins");
     SectionName = TEXT("VMC Live Link");
 
-    // ✅ Set a default TYPE so the Project Settings field isn’t None
+    // Sensible defaults
     DefaultRemapperClass = UVMCLiveLinkRemapper::StaticClass();
+    // DefaultReferenceSkeleton left unset; project can configure it.
 }
