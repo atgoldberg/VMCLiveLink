@@ -13,7 +13,7 @@ public class VMCLiveLinkEditor : ModuleRules
         PrivateDependencyModuleNames.AddRange(new[]{
             "VMCLiveLink",          // runtime module
             "LiveLink","LiveLinkInterface","LiveLinkEditor",
-            "Slate","SlateCore","UnrealEd"
+            "Slate","SlateCore","UnrealEd","AssetTools"
         });
     }
 }
