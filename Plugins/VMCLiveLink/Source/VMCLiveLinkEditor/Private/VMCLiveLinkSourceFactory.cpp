@@ -104,6 +104,12 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
     // Helper used by both Enter key and Create button
     auto CreateAndNotify = [OnCreated, State]()
     {
+        // Validate again before creating (defensive)
+        if (State->SubjectName.TrimStartAndEnd().IsEmpty())
+        {
+            return;
+        }
+
         const FString Conn = FString::Printf(TEXT("port=%d;unity2ue=%d;meters2cm=%d;subject=%s"),
             State->Port, State->bUnityToUE ? 1 : 0, State->bMetersToCm ? 1 : 0, *State->SubjectName);
 
@@ -140,7 +146,7 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                 + SHorizontalBox::Slot().AutoWidth()
                 [
                     SNew(SEditableTextBox)
-                        .HintText(NSLOCTEXT("MySource", "InputHint", "Enter subject name..."))
+                        .HintText(NSLOCTEXT("VMCLiveLink", "InputHint", "Enter subject name..."))
                         .ClearKeyboardFocusOnCommit(false) // optional: avoid focus loss committing closing parent UI
                         .Text_Lambda([State] { return FText::FromString(State->SubjectName); })
                         .OnTextChanged_Lambda([State](const FText& Text) { State->SubjectName = Text.ToString(); })
@@ -149,9 +155,24 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                             State->SubjectName = Text.ToString();
                             if (CommitType == ETextCommit::OnEnter)
                             {
-                                CreateAndNotify();
+                                // Only create if the subject name is non-empty
+                                if (!State->SubjectName.TrimStartAndEnd().IsEmpty())
+                                {
+                                    CreateAndNotify();
+                                }
                             }
                         })
+                ]
+        ]
+        + SVerticalBox::Slot().AutoHeight().Padding(0, 0, 4, 4) // error row
+        [
+            SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth()
+                [
+                    SNew(STextBlock)
+                        .Visibility_Lambda([State]() { return State->SubjectName.TrimStartAndEnd().IsEmpty() ? EVisibility::Visible : EVisibility::Collapsed; })
+                        .ColorAndOpacity(FLinearColor::Red)
+                        .Text(NSLOCTEXT("VMCLiveLink", "EmptySubjectError", "Subject name cannot be empty."))
                 ]
         ]
         + SVerticalBox::Slot().AutoHeight().Padding(4)
@@ -179,6 +200,7 @@ TSharedPtr<SWidget> UVMCLiveLinkSourceFactory::BuildCreationPanel(FOnLiveLinkSou
                 [
                     SNew(SButton)
                         .Text(NSLOCTEXT("VMCLiveLink", "Create", "Create"))
+                        .IsEnabled_Lambda([State]() { return !State->SubjectName.TrimStartAndEnd().IsEmpty(); })
                         .OnClicked_Lambda([CreateAndNotify]()
                         {
                             CreateAndNotify();

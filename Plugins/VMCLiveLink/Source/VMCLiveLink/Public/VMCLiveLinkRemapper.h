@@ -9,7 +9,12 @@
 #include "Roles/LiveLinkAnimationRole.h"
 #include "Roles/LiveLinkAnimationTypes.h"
 #include "Engine/SkeletalMesh.h"
+#include "VMCLiveLinkMappingAsset.h" // new
+#if WITH_EDITOR
+#include "UObject/SoftObjectPtr.h"
+#endif
 #include "VMCLiveLinkRemapper.generated.h"
+
 
 UENUM(BlueprintType)
 
@@ -145,6 +150,44 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "LiveLink|Remapper")
 	void LoadCustomCurveMapFromJSON(const FString& JsonText);
+
+	// Reusable mapping asset selection
+	UPROPERTY(EditAnywhere, Category = "Remapper|Preset")
+	TSoftObjectPtr<UVMCLiveLinkMappingAsset> MappingAsset;
+
+	// Auto-apply a mapping when ReferenceSkeleton is set/changed (editor)
+	UPROPERTY(EditAnywhere, Category = "Remapper|Preset", meta=(EditConditionHides))
+	bool bAutoDetectMappingFromReference = true;
+
+	// Optional: control capturing signature when saving into the assigned asset
+	UPROPERTY(EditAnywhere, Category = "Remapper|Preset", meta=(DisplayName="Capture Signature On Save"))
+	bool bCaptureSignatureOnSave = true;
+
+	UFUNCTION(BlueprintCallable, Category="LiveLink|Remapper")
+	void ApplyMappingAsset(UVMCLiveLinkMappingAsset* Asset, bool bAlsoCaptureSignature = false);
+
+	// Scans content for mapping assets and applies the first that matches ReferenceSkeleton
+	UFUNCTION(BlueprintCallable, Category="LiveLink|Remapper")
+	bool AutoDetectAndApplyMapping();
+
+	// Save the current maps into an asset (optionally capture signature from ReferenceSkeleton)
+	UFUNCTION(CallInEditor, Category="LiveLink|Remapper")
+	void SaveCurrentMappingTo(UVMCLiveLinkMappingAsset* Asset, bool bCaptureSignatureFromReference);
+
+#if WITH_EDITOR
+	// UX buttons (no-arg, show as buttons in Details)
+	UFUNCTION(CallInEditor, Category="LiveLink|Remapper", meta=(DisplayName="Apply Selected Mapping Asset"))
+	void ApplySelectedMappingAsset();
+
+	UFUNCTION(CallInEditor, Category="LiveLink|Remapper", meta=(DisplayName="Auto Detect and Apply Mapping"))
+	void AutoDetectAndApplyMappingInEditor();
+
+	UFUNCTION(CallInEditor, Category="LiveLink|Remapper", meta=(DisplayName="Save Current Mapping to Assigned Asset"))
+	void SaveCurrentMappingToAssignedAsset();
+
+	UFUNCTION(CallInEditor, Category="LiveLink|Remapper", meta=(DisplayName="Create New Mapping Asset"))
+	void CreateAndAssignNewMappingAsset();
+#endif
 
 public:
 	// NOTE: BoneNameMap is declared on the base (ULiveLinkSubjectRemapper). Don't redeclare it here.

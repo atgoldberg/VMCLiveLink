@@ -5,8 +5,17 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include <Remapper/LiveLinkSkeletonRemapper.h>
-#include <LiveLinkRemapAsset.h>
 
+#if WITH_EDITOR
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Modules/ModuleManager.h"
+#include "Editor.h"
+#include "Misc/PackageName.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
+#include "Factories/DataAssetFactory.h"
+#include "Misc/PackageName.h"
+#endif
 
 static void GetBoneNames(TSoftObjectPtr<USkeletalMesh> Mesh, TArray<FName>& Out)
 {
@@ -381,9 +390,150 @@ void UVMCLiveLinkRemapper::SeedBones_FromHumanoidLike(const TArray<FName>& Incom
 
 void UVMCLiveLinkRemapper::SeedFromReferenceSkeleton()
 {
+	USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous();
+	if (!Ref) return;
 
+#if WITH_EDITOR
+	// If user set a specific asset, prefer it
+	if (UVMCLiveLinkMappingAsset* Explicit = MappingAsset.LoadSynchronous())
+	{
+		if (Explicit->MatchesMesh(Ref))
+		{
+			ApplyMappingAsset(Explicit, /*bAlsoCaptureSignature=*/false);
+			return;
+		}
+	}
 
+	// Otherwise try to auto-detect among all mapping assets
+	if (bAutoDetectMappingFromReference)
+	{
+		if (AutoDetectAndApplyMapping())
+		{
+			return;
+		}
+	}
+#endif
+}
 
+void UVMCLiveLinkRemapper::ApplyMappingAsset(UVMCLiveLinkMappingAsset* Asset, bool bAlsoCaptureSignature)
+{
+	if (!Asset) return;
+
+	// NEW: reflect the applied asset in the UI
+	MappingAsset = Asset;
+
+	// Copy maps
+	BoneNameMap = Asset->BoneNameMap;
+	CurveNameMap = Asset->CurveNameMap;
+
+	if (bAlsoCaptureSignature)
+	{
+		if (USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous())
+		{
+#if WITH_EDITOR
+			Asset->CaptureSignatureFrom(Ref);
+#endif
+		}
+	}
+
+	Preset = ELLRemapPreset::Custom;
+	SyncWorker();
+	RequestStaticDataRefresh();
+}
+
+bool UVMCLiveLinkRemapper::AutoDetectAndApplyMapping()
+{
+#if WITH_EDITOR
+	USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous();
+	if (!Ref) return false;
+
+	// Scan all mapping assets in content
+	const FName RegistryModuleName(TEXT("AssetRegistry"));
+	FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(RegistryModuleName);
+
+	TArray<FAssetData> Assets;
+	ARM.GetRegistry().GetAssetsByClass(UVMCLiveLinkMappingAsset::StaticClass()->GetClassPathName(), Assets, /*bSearchSubClasses*/ true);
+
+	// Compute signature once
+	const uint32 Sig = UVMCLiveLinkMappingAsset::ComputeSignature(Ref);
+
+	// 1) Prefer signature match (load asset and check, since FAssetTagValueRef doesn't expose GetArrayValue)
+	for (const FAssetData& AD : Assets)
+	{
+		UVMCLiveLinkMappingAsset* M = Cast<UVMCLiveLinkMappingAsset>(AD.GetAsset());
+		if (!M) continue;
+
+		if (M->SkeletonSignatures.Contains(Sig) || M->MatchesMesh(Ref))
+		{
+			ApplyMappingAsset(M, /*bAlsoCaptureSignature=*/false);
+			return true;
+		}
+	}
+
+	// 2) Fallback: best-effort heuristic — choose the one with the largest intersection of normalized bone names
+	int32 BestScore = -1;
+	UVMCLiveLinkMappingAsset* Best = nullptr;
+
+	// Build normalized set from ref
+	TSet<FString> RefNorm;
+	{
+		const FReferenceSkeleton& RS = Ref->GetRefSkeleton();
+		for (int32 i = 0; i < RS.GetNum(); ++i)
+		{
+			FString S = RS.GetBoneName(i).ToString().ToLower();
+			S.ReplaceInline(TEXT("_"), TEXT(""));
+			S.ReplaceInline(TEXT("-"), TEXT(""));
+			RefNorm.Add(MoveTemp(S));
+		}
+	}
+
+	for (const FAssetData& AD : Assets)
+	{
+		UVMCLiveLinkMappingAsset* M = Cast<UVMCLiveLinkMappingAsset>(AD.GetAsset());
+		if (!M) continue;
+
+		int32 Score = 0;
+		for (const TPair<FName,FName>& KV : M->BoneNameMap)
+		{
+			FString S = KV.Value.ToString().ToLower();
+			S.ReplaceInline(TEXT("_"), TEXT(""));
+			S.ReplaceInline(TEXT("-"), TEXT(""));
+			if (RefNorm.Contains(S)) ++Score;
+		}
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = M;
+		}
+	}
+
+	if (Best && BestScore > 0)
+	{
+		ApplyMappingAsset(Best, /*bAlsoCaptureSignature=*/false);
+		return true;
+	}
+#endif
+
+	return false;
+}
+
+void UVMCLiveLinkRemapper::SaveCurrentMappingTo(UVMCLiveLinkMappingAsset* Asset, bool bCaptureSignatureFromReference)
+{
+	if (!Asset) return;
+
+	Asset->Modify();
+	Asset->BoneNameMap = BoneNameMap;
+	Asset->CurveNameMap = CurveNameMap;
+
+#if WITH_EDITOR
+	if (bCaptureSignatureFromReference)
+	{
+		if (USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous())
+		{
+			Asset->CaptureSignatureFrom(Ref);
+		}
+	}
+#endif
 }
 
 ELLRemapPreset UVMCLiveLinkRemapper::GuessPreset(const TArray<FName>& BoneNames, const TArray<FName>& CurveNames) const
@@ -419,4 +569,62 @@ ELLRemapPreset UVMCLiveLinkRemapper::GuessPreset(const TArray<FName>& BoneNames,
 
 	return ELLRemapPreset::None;
 }
+
+#if WITH_EDITOR
+void UVMCLiveLinkRemapper::ApplySelectedMappingAsset()
+{
+	if (UVMCLiveLinkMappingAsset* Asset = MappingAsset.LoadSynchronous())
+	{
+		ApplyMappingAsset(Asset, /*bAlsoCaptureSignature=*/false);
+	}
+}
+
+void UVMCLiveLinkRemapper::AutoDetectAndApplyMappingInEditor()
+{
+	AutoDetectAndApplyMapping();
+}
+
+void UVMCLiveLinkRemapper::SaveCurrentMappingToAssignedAsset()
+{
+	if (UVMCLiveLinkMappingAsset* Asset = MappingAsset.LoadSynchronous())
+	{
+		SaveCurrentMappingTo(Asset, /*bCaptureSignatureFromReference=*/bCaptureSignatureOnSave);
+		Asset->MarkPackageDirty();
+	}
+}
+
+void UVMCLiveLinkRemapper::CreateAndAssignNewMappingAsset()
+{
+	// Prefer creating next to the reference mesh if available
+	FString DefaultPath = TEXT("/Game");
+	if (USkeletalMesh* Ref = ReferenceSkeleton.LoadSynchronous())
+	{
+		if (UPackage* Pkg = Ref->GetOutermost())
+		{
+			DefaultPath = FPackageName::GetLongPackagePath(Pkg->GetName());
+		}
+	}
+
+	// Configure a DataAsset factory for our asset class
+	UDataAssetFactory* Factory = NewObject<UDataAssetFactory>();
+	Factory->DataAssetClass = UVMCLiveLinkMappingAsset::StaticClass();
+
+	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+	IAssetTools& AssetTools = AssetToolsModule.Get();
+
+	// Show the standard Create Asset dialog
+	UObject* NewObj = AssetTools.CreateAssetWithDialog(TEXT("VMCMapping"), DefaultPath, UVMCLiveLinkMappingAsset::StaticClass(), Factory);
+	UVMCLiveLinkMappingAsset* NewMapping = Cast<UVMCLiveLinkMappingAsset>(NewObj);
+	if (!NewMapping)
+	{
+		return;
+	}
+
+	// Assign, save current maps into it, capture signature, and apply to the worker
+	MappingAsset = NewMapping;
+	SaveCurrentMappingTo(NewMapping, /*bCaptureSignatureFromReference=*/true);
+	ApplyMappingAsset(NewMapping, /*bAlsoCaptureSignature=*/false);
+	NewMapping->MarkPackageDirty();
+}
+#endif
 

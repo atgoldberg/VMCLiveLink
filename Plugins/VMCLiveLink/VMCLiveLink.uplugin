@@ -16,7 +16,7 @@
 		{
 			"Name": "VMCLiveLinkEditor",
 			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit",
+			"LoadingPhase": "Default",
 			"IncludeListPlatforms": [ "Win64" ]
 		}
 	],

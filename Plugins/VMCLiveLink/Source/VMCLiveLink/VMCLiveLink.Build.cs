@@ -6,15 +6,40 @@ public class VMCLiveLink : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-        PublicDependencyModuleNames.AddRange(new[]{
-            "LiveLink","LiveLinkInterface", "LiveLinkAnimationCore",
-            "Core","CoreUObject","Engine", "DeveloperSettings"
+        PublicDependencyModuleNames.AddRange(new[]
+        {
+            "Core",
+            "CoreUObject",
+            "Engine",
+            "LiveLinkInterface",
+            "LiveLink",
+            "OSC",
+
+            // JSON (FJsonValue, FJsonSerializer, FJsonObject etc.)
+            "Json",
+            "JsonUtilities",
+
+            // DeveloperSettings (UDeveloperSettings / project settings)
+            "DeveloperSettings",
+
+            // If you need LiveLink animation helpers / remap types
+            "LiveLinkAnimationCore"
         });
 
-        PrivateDependencyModuleNames.AddRange(new[]{
-          "OSC","Networking","Sockets",
-          "Slate","SlateCore","Json",
-          "JsonUtilities", 
+        PrivateDependencyModuleNames.AddRange(new[]
+        {
+            // used by AutoDetectAndApplyMapping()
+            "AssetRegistry"
         });
+
+        if (Target.bBuildEditor)
+        {
+            PrivateDependencyModuleNames.AddRange(new[]
+            {
+                // Editor-only functionality (creating assets, factories, editor UI)
+                "UnrealEd",
+                "AssetTools"
+            });
+        }
     }
 }
