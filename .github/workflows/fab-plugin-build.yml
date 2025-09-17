@@ -101,13 +101,18 @@ jobs:
           path: FabBuilds\VMCLiveLink.zip
           if-no-files-found: error
 
+      - name: Get current timestamp
+        id: date
+        run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
       - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref_name }}
-          release_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}-${{ steps.date.outputs.timestamp }}
           body: "Automated release created by CI for ${{ github.ref_name }}."
           draft: false
           prerelease: false
