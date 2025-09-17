@@ -63,6 +63,11 @@ jobs:
 
           ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
 
+      - name: Get current timestamp
+        id: date
+        run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
       - name: Prepare single VMCLiveLink.zip
         run: |
           $OutputDir = "$(Resolve-Path .)\FabBuilds"
@@ -73,38 +78,49 @@ jobs:
             exit 1
           }
 
-          $FinalZip = Join-Path $OutputDir 'VMCLiveLink.zip'
-
-          if ($ZipFiles.Count -eq 1) {
-            Copy-Item -Path $ZipFiles[0].FullName -Destination $FinalZip -Force
+          # Use the first ENGINE_VERSIONS entry to construct a short engine folder name like "UE5.6"
+          $EngineVers = ($env:ENGINE_VERSIONS -split ",").ForEach({ $_.Trim(' ""') })
+          $FirstVer = $EngineVers[0]
+          if ($FirstVer -match '^(\d+)\.(\d+)') {
+            $ShortEngine = "UE$($matches[1]).$($matches[2])"
           } else {
-            # Merge multiple Fab zips into a single zip by extracting and recompressing.
-            $TempDir = Join-Path $env:TEMP ('fabzip_' + [Guid]::NewGuid().ToString())
-            New-Item -ItemType Directory -Path $TempDir | Out-Null
-
-            foreach ($z in $ZipFiles) {
-              Expand-Archive -Path $z.FullName -DestinationPath $TempDir -Force
-            }
-
-            if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
-
-            # Compress-Archive expects a wildcard to include contents of temp dir
-            Compress-Archive -Path (Join-Path $TempDir '*') -DestinationPath $FinalZip -Force
-
-            Remove-Item -Path $TempDir -Recurse -Force
+            # Fallback: remove any trailing .0 and non-digit/dot chars
+            $ver = $FirstVer -replace '\.0+$','' -replace '[^0-9\.]',''
+            $ShortEngine = "UE$ver"
           }
+
+          $Timestamp = '${{ steps.date.outputs.timestamp }}'
+          $FinalZip = Join-Path $OutputDir ("VMCLiveLink-$Timestamp.zip")
+
+          # Create a temp directory which will contain the top-level engine folder
+          $TempDir = Join-Path $env:TEMP ('fabzip_' + [Guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+          $TargetRoot = Join-Path $TempDir $ShortEngine
+          $TargetPlugins = Join-Path $TargetRoot 'Plugins'
+          $TargetVMCL = Join-Path $TargetPlugins 'VMCLiveLink'
+
+          New-Item -ItemType Directory -Path $TargetVMCL -Force | Out-Null
+
+          # Extract each Fab zip into the VMCLiveLink folder so the final zip will have
+          # <ShortEngine>/Plugins/VMCLiveLink/...
+          foreach ($z in $ZipFiles) {
+            Expand-Archive -Path $z.FullName -DestinationPath $TargetVMCL -Force
+          }
+
+          if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
+
+          # Compress the temp dir's contents (which includes the ShortEngine folder) so the zip will contain the top-level folder
+          Compress-Archive -Path (Join-Path $TempDir '*') -DestinationPath $FinalZip -Force
+
+          Remove-Item -Path $TempDir -Recurse -Force
 
       - name: Upload artifact (single zip)
         uses: actions/upload-artifact@v4
         with:
           name: VMCLiveLink
-          path: FabBuilds\VMCLiveLink.zip
+          path: FabBuilds\VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
           if-no-files-found: error
-
-      - name: Get current timestamp
-        id: date
-        run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
-        shell: powershell
 
       - name: Create GitHub Release
         id: create_release
@@ -121,6 +137,6 @@ jobs:
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: FabBuilds\VMCLiveLink.zip
-          asset_name: VMCLiveLink.zip
+          asset_path: FabBuilds\VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
+          asset_name: VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
           asset_content_type: application/zip
