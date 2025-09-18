@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "VersionName": "0.1.0",
+  "Version": 1,
+  "FriendlyName": "VRM Interchange",
+  "Description": "Minimal VRM (.vrm) importer via Interchange (skeletal mesh + textures + blendshapes).",
+  "Category": "Importers",
+  "Modules": [
+    { "Name": "VRMInterchange", "Type": "Editor", "LoadingPhase": "Default" }
+  ],
+  "EnabledByDefault": true,
+  "Plugins": [
+    { "Name": "Interchange", "Enabled": true },
+    { "Name": "InterchangeEditor", "Enabled": true }
+  ]
+}
