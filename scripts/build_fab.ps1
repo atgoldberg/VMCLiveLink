@@ -6,12 +6,6 @@
   Uses Unreal AutomationTool (RunUAT.bat BuildPlugin) to compile the plugin for each engine version,
   strips build artifacts, and produces Fab-ready zips with EngineVersion updated in the .uplugin.
 
-  Fixes/changes:
-  - More robust comment stripping that does not remove '//' or '/* */' that appear inside JSON string values.
-  - Avoids accidental literal $1/$2 insertion by using a MatchEvaluator when doing regex replacements.
-  - Writes JSON using Set-Content with explicit UTF8 to avoid PowerShell formatting quirks.
-  - Minor robustness improvements (explicit -Path and -Destination, -ErrorAction on critical steps).
-
 .PARAMETER PluginDir
   Path to the plugin root folder (contains *.uplugin).
 
@@ -23,12 +17,6 @@
 
 .PARAMETER EngineVersions
   Corresponding engine version strings to place in the .uplugin (e.g., 5.4.0 5.5.0 5.6.0).
-
-.EXAMPLE
-  .\build_fab.ps1 -PluginDir "U:\UnrealProjects\VMCLiveLinkProject\Plugins\VMCLiveLink" `
-                  -OutputDir "U:\FabBuilds" `
-                  -EngineRoots "C:\UE\5.4","C:\UE\5.5","C:\UE\5.6" `
-                  -EngineVersions "5.4.0","5.5.0","5.6.0"
 #>
 
 param(
@@ -198,7 +186,7 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
 
   # Text patch fallback (careful to only change the EngineVersion property)
   if ($txt -match '"EngineVersion"\s*:') {
-    # Use a MatchEvaluator to avoid accidental literal $1/$2 in the output
+    # Replace EngineVersion using a MatchEvaluator to avoid accidental literal $1/$2 in the output
     $pattern = '("EngineVersion"\s*:\s*")([^"]*)(")'
     $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
       param($m)
@@ -206,18 +194,17 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
     }
     $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, $pattern, $evaluator, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 
-    # Ensure SupportedTargetPlatforms exists in text fallback: if not present, try to insert it near top-level keys.
+    # Ensure SupportedTargetPlatforms exists in text fallback: if not present, insert it after the EngineVersion line.
     if ($txt -notmatch '"SupportedTargetPlatforms"\s*:') {
-      # Try to insert after EngineVersion if present, else after opening brace.
-      if ($txt -match '"EngineVersion"\s*:') {
-        $txt = $txt -replace '("EngineVersion"\s*:\s*"[^\"]*"\s*,?)', '$1' + "`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
-      } else {
-        $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`",`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
+      $pattern2 = '("EngineVersion"\s*:\s*"[^\"]*"\s*,?)'
+      $evaluator2 = [System.Text.RegularExpressions.MatchEvaluator]{
+        param($m)
+        return $m.Groups[1].Value + "`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
       }
+      $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, $pattern2, $evaluator2, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
     }
   } else {
-    # Insert EngineVersion after the opening brace only (anchor to start)
-    # Preserve indentation of the first line if possible
+    # Insert EngineVersion and SupportedTargetPlatforms after the opening brace if EngineVersion isn't present
     $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`",`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
   }
   # Write out the patched file
