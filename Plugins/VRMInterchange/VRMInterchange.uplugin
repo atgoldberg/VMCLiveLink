@@ -9,7 +9,8 @@
     {
       "Name": "VRMInterchange",
       "Type": "Editor",
-      "LoadingPhase": "Default"
+      "LoadingPhase": "Default",
+			"IncludeListPlatforms": [ "Win64" ]
     }
   ],
   "EnabledByDefault": true,
