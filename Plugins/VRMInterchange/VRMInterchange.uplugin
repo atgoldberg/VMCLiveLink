@@ -6,11 +6,31 @@
   "Description": "Minimal VRM (.vrm) importer via Interchange (skeletal mesh + textures + blendshapes).",
   "Category": "Importers",
   "Modules": [
-    { "Name": "VRMInterchange", "Type": "Editor", "LoadingPhase": "Default" }
+    {
+      "Name": "VRMInterchange",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
   ],
   "EnabledByDefault": true,
   "Plugins": [
-    { "Name": "Interchange", "Enabled": true },
-    { "Name": "InterchangeEditor", "Enabled": true }
-  ]
+    {
+      "Name": "Interchange",
+      "Enabled": true
+    },
+    {
+      "Name": "InterchangeEditor",
+      "Enabled": true
+    }
+  ],
+
+  "CreatedBy": "Lifelike & Believable Animation Design, Inc.",
+  "CreatedByURL": "https://www.lifelikeandbelievable.com",
+  "DocsURL": "",
+  "MarketplaceURL": "",
+  "SupportURL": "",
+  "CanContainContent": true,
+  "IsBetaVersion": false,
+  "IsExperimentalVersion": false,
+  "Installed": false
 }
