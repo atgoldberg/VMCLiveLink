@@ -40,7 +40,6 @@ if ($EngineRoots.Count -ne $EngineVersions.Count) {
 
 $PluginDir = (Resolve-Path $PluginDir).Path
 
-
 $OutputDirRaw = $OutputDir
 $resolved = Resolve-Path -LiteralPath $OutputDirRaw -ErrorAction SilentlyContinue
 if ($null -eq $resolved) {
@@ -73,11 +72,7 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   if ($null -ne $data) {
     $data.EngineVersion = $engineVersion
     if (-not $data.SupportedTargetPlatforms) { $data.SupportedTargetPlatforms = @("Win64") }
-    if (-not $data.Plugins) { $data.Plugins = @() }
-    $names = @($data.Plugins | ForEach-Object { $_.Name })
-    foreach ($dep in @("LiveLink","OSC")) {
-      if ($names -notcontains $dep) { $data.Plugins += @{ Name=$dep; Enabled=$true } }
-    }
+    # Do not inject any additional dependencies; leave Plugins as-is
     ($data | ConvertTo-Json -Depth 100) | Out-File -Encoding UTF8 -FilePath $jsonPath
   } else {
     # Text patch fallback
@@ -92,6 +87,7 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
       # Insert EngineVersion after the opening brace only (anchor to start)
       $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
     }
+    # No dependency injection in text-patch fallback
     Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
   }
 }
