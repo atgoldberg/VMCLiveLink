@@ -71,6 +71,23 @@ static FQuat GltfToUE_Quat(const FQuat& Q)
     return Rue.ToQuat().GetNormalized();
 }
 
+// --- Reference pose fix helpers ---
+// Apply a minimal correction so that:
+// 1) Left/Right is unmirrored (mirror across Y axis),
+// 2) Forward faces +Y (apply +90deg rotation around Z)
+static FORCEINLINE FVector3f RefFix_Vector(const FVector3f& V)
+{
+    // Mirror across Y (flip sign)
+    const FVector3f M(V.X, -V.Y, V.Z);
+    // Rotate +90 degrees around Z: (x,y,z) -> (-y,x,z)
+    return FVector3f(-M.Y, M.X, M.Z);
+}
+static FORCEINLINE FVector RefFix_Vector(const FVector& V)
+{
+    const FVector M(V.X, -V.Y, V.Z);
+    return FVector(-M.Y, M.X, M.Z);
+}
+
 template<typename TWeight>
 static void BindAllToRoot(TArray<TWeight>& Weights);
 
@@ -192,7 +209,10 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
 
         // Basic shading settings
         if (M.bDoubleSided) { MatGraph->SetCustomTwoSided(true); }
-        if (M.AlphaMode == 1) { MatGraph->SetCustomBlendMode(EBlendMode::BLEND_Masked); MatGraph->SetCustomOpacityMaskClipValue(M.AlphaCutoff); }
+        // Force Masked blend for VRM; use AlphaCutoff if provided otherwise default to 0.5
+        MatGraph->SetCustomBlendMode(EBlendMode::BLEND_Masked);
+        if (M.AlphaMode == 1) { MatGraph->SetCustomOpacityMaskClipValue(M.AlphaCutoff); }
+        else { MatGraph->SetCustomOpacityMaskClipValue(0.5f); }
 
         using namespace UE::Interchange::Materials::Standard::Nodes;
         using namespace UE::Interchange::Materials;
@@ -214,6 +234,8 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
             if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("BaseColorTex"), M.BaseColorTexture))
             {
                 UInterchangeShaderPortsAPI::ConnectDefaultOuputToInput(MatGraph, PBRMR::Parameters::BaseColor.ToString(), TS->GetUniqueID());
+                // Also route alpha to OpacityMask to support cutouts from base color alpha
+                UInterchangeShaderPortsAPI::ConnectOuputToInputByName(MatGraph, PBRMR::Parameters::OpacityMask.ToString(), TS->GetUniqueID(), TextureSample::Outputs::A.ToString());
             }
         }
         // Normal
@@ -390,7 +412,9 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
         const int32 MatIndex = PMesh.TriMaterialIndex.IsValidIndex(t) ? PMesh.TriMaterialIndex[t] : 0;
         const FPolygonGroupID PG = GetPGForMat(MatIndex);
         // Reverse winding (glTF->UE handedness)
-        MD.CreateTriangle(PG, { VI0, VI2, VI1 });
+        // Note: We also apply an additional mirror in RefFix, which flips handedness again.
+        // So we do NOT reverse the winding here to keep normals facing outward.
+        MD.CreateTriangle(PG, { VI0, VI1, VI2 });
     }
 
     // Skin weights and joint names
@@ -637,6 +661,34 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
             FVector S = GltfToUE_Vector(Local.GetScale3D());
             B.LocalBind = FTransform(R, T, S);
         }
+
+        // Rebuild bone local binds so that:
+        //  - All local rotations are identity
+        //  - Global joint positions are corrected to face +Y and be unmirrored L/R
+        {
+            const int32 NumBones = Out.Bones.Num();
+            TArray<FTransform> GlobalXf; GlobalXf.SetNum(NumBones);
+            TArray<FVector>    FixedGlobalPos; FixedGlobalPos.SetNum(NumBones);
+
+            // Compute original global transforms from current local binds
+            for (int32 i = 0; i < NumBones; ++i)
+            {
+                const int32 Parent = Out.Bones[i].Parent;
+                const FTransform ParentGlobal = (Parent == INDEX_NONE) ? FTransform::Identity : GlobalXf[Parent];
+                GlobalXf[i] = Out.Bones[i].LocalBind * ParentGlobal;
+                // Apply reference fix to the global position
+                FixedGlobalPos[i] = RefFix_Vector(GlobalXf[i].GetTranslation());
+            }
+
+            // Recreate local binds as pure translations (identity rotation), preserving corrected positions
+            for (int32 i = 0; i < NumBones; ++i)
+            {
+                const int32 Parent = Out.Bones[i].Parent;
+                const FVector ParentPos = (Parent == INDEX_NONE) ? FVector::ZeroVector : FixedGlobalPos[Parent];
+                const FVector LocalT = FixedGlobalPos[i] - ParentPos;
+                Out.Bones[i].LocalBind = FTransform(FQuat::Identity, LocalT, FVector(1,1,1));
+            }
+        }
     }
     else
     {
@@ -698,12 +750,12 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
 
             for (int32 v = 0; v < VertCount; ++v)
             {
-                FVector3f Pue = GltfToUE_Vector(PosLocal[v]) * Out.GlobalScale;
+                FVector3f Pue = RefFix_Vector(GltfToUE_Vector(PosLocal[v])) * Out.GlobalScale;
                 Out.Mesh.Positions.Add(Pue);
 
                 if (NrmLocal.IsValidIndex(v))
                 {
-                    FVector3f Nue = GltfToUE_Vector(NrmLocal[v]);
+                    FVector3f Nue = RefFix_Vector(GltfToUE_Vector(NrmLocal[v]));
                     Out.Mesh.Normals.Add(Nue); 
                 }
                 else
