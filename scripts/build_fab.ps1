@@ -146,79 +146,55 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
 
   $data = $null
   try {
-    $data = $txt2 | ConvertFrom-Json -ErrorAction Stop
+    $data = $txt2 | ConvertFrom-Json -Depth 100 -ErrorAction Stop
   } catch {
     $data = $null
   }
 
   if ($null -ne $data) {
-    # Some JSON->PowerShell conversions can produce objects that are not directly mutable
-    # (arrays, non-PSCustomObject wrappers, etc). Build a fresh PSCustomObject (or array thereof)
-    # and modify that so we avoid "property cannot be found" / "cannot set" exceptions.
-    $makeMutable = {
-      param($obj)
-      if ($obj -is [System.Array]) {
-        # If it's an array of objects, try to make each element a PSCustomObject where possible
+    # Robust approach: build new ordered hashtable(s) from the parsed JSON (object or array),
+    # set/ensure EngineVersion and SupportedTargetPlatforms, then write JSON out.
+    try {
+      if ($data -is [System.Array]) {
         $newArr = @()
-        foreach ($el in $obj) {
-          if ($el -ne $null -and $el.PSObject -and $el.PSObject.Properties.Count -gt 0) {
-            $h = @{}
+        foreach ($el in $data) {
+          if ($el -and $el.PSObject -and $el.PSObject.Properties.Count -gt 0) {
+            $h = [ordered]@{}
             foreach ($p in $el.PSObject.Properties) { $h[$p.Name] = $p.Value }
+            # Ensure EngineVersion is set/updated
+            $h['EngineVersion'] = $engineVersion
+            # Ensure SupportedTargetPlatforms exists and is non-empty
+            if (-not $h.ContainsKey('SupportedTargetPlatforms') -or -not $h['SupportedTargetPlatforms']) {
+              $h['SupportedTargetPlatforms'] = @("Win64")
+            }
             $newArr += [PSCustomObject]$h
           } else {
+            # element is not an object with properties; keep as-is
             $newArr += $el
           }
         }
-        return ,$newArr
-      } elseif ($obj -ne $null -and $obj.PSObject -and $obj.PSObject.Properties.Count -gt 0) {
-        $h = @{}
-        foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = $p.Value }
-        return [PSCustomObject]$h
+        $jsonOut = $newArr | ConvertTo-Json -Depth 100 -Compress:$false
+        Set-Content -Path $jsonPath -Value $jsonOut -Encoding UTF8
+        return
       } else {
-        return $obj
-      }
-    }
-
-    $mutable = & $makeMutable $data
-
-    # Now we expect $mutable to be a PSCustomObject (or array with PSCustomObject element(s))
-    if ($mutable -is [System.Array]) {
-      # If it's an array, attempt to update the first object element that has properties.
-      $updated = $false
-      for ($idx = 0; $idx -lt $mutable.Count; $idx++) {
-        $el = $mutable[$idx]
-        if ($el -and $el.PSObject -and $el.PSObject.Properties.Count -gt 0) {
-          if (-not $el.PSObject.Properties.Match('SupportedTargetPlatforms')) {
-            $el | Add-Member -MemberType NoteProperty -Name SupportedTargetPlatforms -Value @("Win64")
-          } elseif (-not $el.SupportedTargetPlatforms) {
-            $el.SupportedTargetPlatforms = @("Win64")
-          }
-          $mutable[$idx] = $el
-          $updated = $true
-          break
+        # single object
+        $h = [ordered]@{}
+        foreach ($p in $data.PSObject.Properties) { $h[$p.Name] = $p.Value }
+        # Update EngineVersion
+        $h['EngineVersion'] = $engineVersion
+        # Ensure SupportedTargetPlatforms exists and is non-empty
+        if (-not $h.ContainsKey('SupportedTargetPlatforms') -or -not $h['SupportedTargetPlatforms']) {
+          $h['SupportedTargetPlatforms'] = @("Win64")
         }
+        $jsonOut = $h | ConvertTo-Json -Depth 100 -Compress:$false
+        Set-Content -Path $jsonPath -Value $jsonOut -Encoding UTF8
+        return
       }
-      if (-not $updated) {
-        # couldn't find a suitable element to update, fall back to text-patch below
-        $mutable = $null
-      }
-    } else {
-      # single object
-      if (-not $mutable.PSObject.Properties.Match('SupportedTargetPlatforms')) {
-        $mutable | Add-Member -MemberType NoteProperty -Name SupportedTargetPlatforms -Value @("Win64")
-      } elseif (-not $mutable.SupportedTargetPlatforms) {
-        $mutable.SupportedTargetPlatforms = @("Win64")
-      }
+    } catch {
+      # If anything goes wrong updating via object model, fall back to the text-patch below.
+      Write-Host "JSON manipulation failed; falling back to text patch. Error: $($_.Exception.Message)"
     }
-
-    if ($null -ne $mutable) {
-      $jsonOut = $mutable | ConvertTo-Json -Depth 100 -Compress:$false
-      # Write UTF8 without BOM
-      Set-Content -Path $jsonPath -Value $jsonOut -Encoding UTF8
-      return
-    }
-    # else fall through to text patch fallback
-  } 
+  }
 
   # Text patch fallback (careful to only change the EngineVersion property)
   if ($txt -match '"EngineVersion"\s*:') {
@@ -229,10 +205,20 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
       return $m.Groups[1].Value + $engineVersion + $m.Groups[3].Value
     }
     $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, $pattern, $evaluator, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+
+    # Ensure SupportedTargetPlatforms exists in text fallback: if not present, try to insert it near top-level keys.
+    if ($txt -notmatch '"SupportedTargetPlatforms"\s*:') {
+      # Try to insert after EngineVersion if present, else after opening brace.
+      if ($txt -match '"EngineVersion"\s*:') {
+        $txt = $txt -replace '("EngineVersion"\s*:\s*"[^\"]*"\s*,?)', '$1' + "`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
+      } else {
+        $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`",`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
+      }
+    }
   } else {
     # Insert EngineVersion after the opening brace only (anchor to start)
     # Preserve indentation of the first line if possible
-    $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
+    $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`",`n  `"SupportedTargetPlatforms`": [ `"Win64`" ],"
   }
   # Write out the patched file
   Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
