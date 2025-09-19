@@ -152,34 +152,90 @@ function Set-EngineVersionInUPlugin($jsonPath, $engineVersion) {
   }
 
   if ($null -ne $data) {
-    # Ensure SupportedTargetPlatforms exists (do not overwrite if present)
-    if (-not $data.PSObject.Properties.Match('SupportedTargetPlatforms')) {
-      $data | Add-Member -MemberType NoteProperty -Name SupportedTargetPlatforms -Value @("Win64")
-    } elseif (-not $data.SupportedTargetPlatforms) {
-      $data.SupportedTargetPlatforms = @("Win64")
+    # Some JSON->PowerShell conversions can produce objects that are not directly mutable
+    # (arrays, non-PSCustomObject wrappers, etc). Build a fresh PSCustomObject (or array thereof)
+    # and modify that so we avoid "property cannot be found" / "cannot set" exceptions.
+    $makeMutable = {
+      param($obj)
+      if ($obj -is [System.Array]) {
+        # If it's an array of objects, try to make each element a PSCustomObject where possible
+        $newArr = @()
+        foreach ($el in $obj) {
+          if ($el -ne $null -and $el.PSObject -and $el.PSObject.Properties.Count -gt 0) {
+            $h = @{}
+            foreach ($p in $el.PSObject.Properties) { $h[$p.Name] = $p.Value }
+            $newArr += [PSCustomObject]$h
+          } else {
+            $newArr += $el
+          }
+        }
+        return ,$newArr
+      } elseif ($obj -ne $null -and $obj.PSObject -and $obj.PSObject.Properties.Count -gt 0) {
+        $h = @{}
+        foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = $p.Value }
+        return [PSCustomObject]$h
+      } else {
+        return $obj
+      }
     }
 
-    $jsonOut = $data | ConvertTo-Json -Depth 100 -Compress:$false
-    # Write UTF8 without BOM (PowerShell Core and 5.1 handle -Encoding UTF8 differently; Set-Content is reliable)
-    Set-Content -Path $jsonPath -Value $jsonOut -Encoding UTF8
-  } else {
-    # Text patch fallback (careful to only change the EngineVersion property)
-    if ($txt -match '"EngineVersion"\s*:') {
-      # Use a MatchEvaluator to avoid accidental literal $1/$2 in the output
-      $pattern = '("EngineVersion"\s*:\s*")([^"]*)(")'
-      $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
-        param($m)
-        return $m.Groups[1].Value + $engineVersion + $m.Groups[3].Value
+    $mutable = & $makeMutable $data
+
+    # Now we expect $mutable to be a PSCustomObject (or array with PSCustomObject element(s))
+    if ($mutable -is [System.Array]) {
+      # If it's an array, attempt to update the first object element that has properties.
+      $updated = $false
+      for ($idx = 0; $idx -lt $mutable.Count; $idx++) {
+        $el = $mutable[$idx]
+        if ($el -and $el.PSObject -and $el.PSObject.Properties.Count -gt 0) {
+          if (-not $el.PSObject.Properties.Match('SupportedTargetPlatforms')) {
+            $el | Add-Member -MemberType NoteProperty -Name SupportedTargetPlatforms -Value @("Win64")
+          } elseif (-not $el.SupportedTargetPlatforms) {
+            $el.SupportedTargetPlatforms = @("Win64")
+          }
+          $mutable[$idx] = $el
+          $updated = $true
+          break
+        }
       }
-      $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, $pattern, $evaluator, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      if (-not $updated) {
+        # couldn't find a suitable element to update, fall back to text-patch below
+        $mutable = $null
+      }
     } else {
-      # Insert EngineVersion after the opening brace only (anchor to start)
-      # Preserve indentation of the first line if possible
-      $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
+      # single object
+      if (-not $mutable.PSObject.Properties.Match('SupportedTargetPlatforms')) {
+        $mutable | Add-Member -MemberType NoteProperty -Name SupportedTargetPlatforms -Value @("Win64")
+      } elseif (-not $mutable.SupportedTargetPlatforms) {
+        $mutable.SupportedTargetPlatforms = @("Win64")
+      }
     }
-    # Write out the patched file
-    Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
+
+    if ($null -ne $mutable) {
+      $jsonOut = $mutable | ConvertTo-Json -Depth 100 -Compress:$false
+      # Write UTF8 without BOM
+      Set-Content -Path $jsonPath -Value $jsonOut -Encoding UTF8
+      return
+    }
+    # else fall through to text patch fallback
+  } 
+
+  # Text patch fallback (careful to only change the EngineVersion property)
+  if ($txt -match '"EngineVersion"\s*:') {
+    # Use a MatchEvaluator to avoid accidental literal $1/$2 in the output
+    $pattern = '("EngineVersion"\s*:\s*")([^"]*)(")'
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+      param($m)
+      return $m.Groups[1].Value + $engineVersion + $m.Groups[3].Value
+    }
+    $txt = [System.Text.RegularExpressions.Regex]::Replace($txt, $pattern, $evaluator, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  } else {
+    # Insert EngineVersion after the opening brace only (anchor to start)
+    # Preserve indentation of the first line if possible
+    $txt = $txt -replace '^\s*\{', "{`n  `"EngineVersion`": `"$engineVersion`","
   }
+  # Write out the patched file
+  Set-Content -Value $txt -Path $jsonPath -Encoding UTF8
 }
 
 for ($i = 0; $i -lt $EngineRoots.Count; $i++) {
