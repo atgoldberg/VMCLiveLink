@@ -18,6 +18,7 @@ jobs:
         shell: powershell
     env:
       PLUGIN_DIR: "Plugins/VMCLiveLink"
+      VRM_PLUGIN_DIR: "Plugins/VRMInterchange"
       ENGINE_ROOTS: 'C:\\Program Files\\Epic Games\\UE_5.6'
       ENGINE_VERSIONS: '5.6.0'
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,9 +52,8 @@ jobs:
           $PluginDir = $env:PLUGIN_DIR
           python "scripts\add_copyright_headers.py" $PluginDir --holder "Lifelike & Believable Animation Design, Inc." --verify
 
-      - name: Build Fab packages
+      - name: Build Fab packages (VMCLiveLink and VRMInterchange)
         run: |
-          $PluginDir = $env:PLUGIN_DIR
           $OutputDir = "$(Resolve-Path .)\FabBuilds"
           New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
@@ -61,14 +61,21 @@ jobs:
           $EngineRoots = ($env:ENGINE_ROOTS -split ",").ForEach({ $_.Trim(' ""') })
           $EngineVers  = ($env:ENGINE_VERSIONS -split ",").ForEach({ $_.Trim(' ""') })
 
-          ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
+          $PluginDirs = @()
+          if ($env:PLUGIN_DIR) { $PluginDirs += $env:PLUGIN_DIR }
+          if ($env:VRM_PLUGIN_DIR) { $PluginDirs += $env:VRM_PLUGIN_DIR }
+
+          foreach ($pd in $PluginDirs) {
+            Write-Host "Building Fab package for plugin at: $pd"
+            ./scripts/build_fab.ps1 -PluginDir $pd -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
+          }
 
       - name: Get current timestamp
         id: date
         run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
         shell: powershell
 
-      - name: Prepare single VMCLiveLink.zip
+      - name: Prepare single VMCLiveLink.zip (includes VMCLiveLink and VRMInterchange)
         run: |
           $OutputDir = "$(Resolve-Path .)\FabBuilds"
           $ZipFiles = Get-ChildItem -Path $OutputDir -Filter '*_Fab.zip' -File -ErrorAction SilentlyContinue
@@ -99,13 +106,24 @@ jobs:
           $TargetRoot = Join-Path $TempDir $ShortEngine
           $TargetPlugins = Join-Path $TargetRoot 'Plugins'
           $TargetVMCL = Join-Path $TargetPlugins 'VMCLiveLink'
+          $TargetVRM  = Join-Path $TargetPlugins 'VRMInterchange'
 
           New-Item -ItemType Directory -Path $TargetVMCL -Force | Out-Null
+          New-Item -ItemType Directory -Path $TargetVRM  -Force | Out-Null
 
-          # Extract each Fab zip into the VMCLiveLink folder so the final zip will have
-          # <ShortEngine>/Plugins/VMCLiveLink/...
+          # Extract each Fab zip into the correct plugin folder so the final zip will have:
+          # <ShortEngine>/Plugins/VMCLiveLink/... and <ShortEngine>/Plugins/VRMInterchange/...
           foreach ($z in $ZipFiles) {
-            Expand-Archive -Path $z.FullName -DestinationPath $TargetVMCL -Force
+            if ($z.Name -match 'VRMInterchange') {
+              Write-Host "Extracting $($z.Name) to $TargetVRM"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetVRM -Force
+            } elseif ($z.Name -match 'VMCLiveLink') {
+              Write-Host "Extracting $($z.Name) to $TargetVMCL"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetVMCL -Force
+            } else {
+              Write-Warning "Zip $($z.Name) did not match a known plugin; extracting to Plugins root"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetPlugins -Force
+            }
           }
 
           if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
