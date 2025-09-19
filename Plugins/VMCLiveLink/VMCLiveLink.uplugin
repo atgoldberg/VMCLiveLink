@@ -20,7 +20,7 @@
 			"IncludeListPlatforms": [ "Win64" ]
 		}
 	],
-	
+
 	"Plugins": [
 		{
 			"Name": "LiveLink",
@@ -31,12 +31,13 @@
 			"Enabled": true
 		}
 	],
-	
+
 	"CreatedBy": "Lifelike & Believable Animation Design, Inc.",
 	"CreatedByURL": "https://www.lifelikeandbelievable.com",
 	"DocsURL": "",
 	"MarketplaceURL": "",
 	"SupportURL": "",
+	"EngineVersion": "5.6.0",
 	"CanContainContent": true,
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
