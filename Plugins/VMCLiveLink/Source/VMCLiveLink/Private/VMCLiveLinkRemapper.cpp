@@ -261,21 +261,22 @@ void UVMCLiveLinkRemapper::SeedCurvesAndBones_VRoid()
 	BoneNameMap.FindOrAdd("RightLittleIntermediate")	= "J_Bip_R_Little2";
 	BoneNameMap.FindOrAdd("RightLittleDistal")			= "J_Bip_R_Little3";
 
-	CurveNameMap.FindOrAdd("Blink") = "Face.M_F00_000_Fcl_EYE_Close"; // single blink → we’ll mirror in runtime
-	CurveNameMap.FindOrAdd("Blink_L") = "Face.M_F00_000_Fcl_EYE_Close_L";
-	CurveNameMap.FindOrAdd("Blink_R") = "Face.M_F00_000_Fcl_EYE_Close_R";
+	CurveNameMap.FindOrAdd("Blink") = "Fcl_EYE_Close"; // single blink → we’ll mirror in runtime
+	CurveNameMap.FindOrAdd("Blink_L") = "Fcl_EYE_Close_L";
+	CurveNameMap.FindOrAdd("Blink_R") = "Fcl_EYE_Close_R";
 
-	CurveNameMap.FindOrAdd("Joy") = "Face.M_F00_000_Fcl_ALL_Joy";
-	CurveNameMap.FindOrAdd("Angry") = "Face.M_F00_000_Fcl_ALL_Angry";
-	CurveNameMap.FindOrAdd("Sorrow") = "Face.M_F00_000_Fcl_ALL_Sorrow";
-	CurveNameMap.FindOrAdd("Fun") = "Face.M_F00_000_Fcl_ALL_Fun";
+	CurveNameMap.FindOrAdd("Joy") = "Fcl_ALL_Joy";
+	CurveNameMap.FindOrAdd("Angry") = "Fcl_ALL_Angry";
+	CurveNameMap.FindOrAdd("Sorrow") = "Fcl_ALL_Sorrow";
+	CurveNameMap.FindOrAdd("Fun") = "Fcl_ALL_Fun";
+	CurveNameMap.FindOrAdd("Surprised") = "Fcl_ALL_Surprised";
 
 	// A I U E O → a pragmatic ARKit set
-	CurveNameMap.FindOrAdd("A") = "Face.M_F00_000_Fcl_MTH_A";
-	CurveNameMap.FindOrAdd("I") = "Face.M_F00_000_Fcl_MTH_I";
-	CurveNameMap.FindOrAdd("U") = "Face.M_F00_000_Fcl_MTH_U";
-	CurveNameMap.FindOrAdd("E") = "Face.M_F00_000_Fcl_MTH_E";
-	CurveNameMap.FindOrAdd("O") = "Face.M_F00_000_Fcl_MTH_O";
+	CurveNameMap.FindOrAdd("A") = "Fcl_MTH_A";
+	CurveNameMap.FindOrAdd("I") = "Fcl_MTH_I";
+	CurveNameMap.FindOrAdd("U") = "Fcl_MTH_U";
+	CurveNameMap.FindOrAdd("E") = "Fcl_MTH_E";
+	CurveNameMap.FindOrAdd("O") = "Fcl_MTH_O";
 }
 
 void UVMCLiveLinkRemapper::SeedCurves_VMC_VRM()
