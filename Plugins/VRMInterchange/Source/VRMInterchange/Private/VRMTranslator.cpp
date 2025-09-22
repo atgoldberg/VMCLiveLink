@@ -338,137 +338,336 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
     SkelActorNode->SetCustomAssetInstanceUid(MeshNodeUid);
     SkelActorNode->SetCustomLocalTransform(&NodeContainer, FTransform::Identity);
 
+    // Create Interchange mesh nodes for each parsed morph target so the pipeline can request morph payloads
+    for (int32 MorphIndex = 0; MorphIndex < Parsed.Mesh.Morphs.Num(); ++MorphIndex)
+    {
+        const FVRMParsedMorph& PMorph = Parsed.Mesh.Morphs[MorphIndex];
+        // Make a node UID unique to this morph
+        const FString MorphNodeUid = MakeNodeUid(*FString::Printf(TEXT("Morph_%d"), MorphIndex));
+        // Fallback to generated name if none present
+        const FString MorphDisplayName = PMorph.Name.IsEmpty() ? FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex) : PMorph.Name;
+
+        // Skip if node already exists
+        if (const UInterchangeMeshNode* Existing = Cast<UInterchangeMeshNode>(NodeContainer.GetNode(MorphNodeUid)))
+        {
+            // Ensure dependency on mesh
+            MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
+            continue;
+        }
+
+        UInterchangeMeshNode* MorphNode = NewObject<UInterchangeMeshNode>(&NodeContainer);
+        NodeContainer.SetupNode(MorphNode, MorphNodeUid, *MorphDisplayName, EInterchangeNodeContainerType::TranslatedAsset);
+
+        // Assign a unique payload key so the pipeline can request payload data for this morph (payload handling can be implemented later)
+        const FString MorphPayloadKey = FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex);
+        MorphNode->SetPayLoadKey(MorphPayloadKey, EInterchangeMeshPayLoadType::MORPHTARGET);
+
+        // Mark as morph target and set its name
+        MorphNode->SetMorphTarget(true);
+        MorphNode->SetMorphTargetName(MorphDisplayName);
+
+        // Add dependency on the main mesh so the pipeline knows this morph belongs to the mesh
+        MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
+    }
+
     return true;
 }
 
 // ===== Mesh Payload Interface (UE 5.6) =====
 
 TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
-    const FInterchangeMeshPayLoadKey& /*PayLoadKey*/,
-    const UE::Interchange::FAttributeStorage& /*PayloadAttributes*/) const
+    const FInterchangeMeshPayLoadKey& PayLoadKey,
+    const UE::Interchange::FAttributeStorage& PayloadAttributes) const
 {
     using namespace UE::Interchange;
 
+    // Read optional global transform attribute (used by factories)
+    FTransform MeshGlobalTransform = FTransform::Identity;
+    PayloadAttributes.GetAttribute(UE::Interchange::FAttributeKey{ MeshPayload::Attributes::MeshGlobalTransform }, MeshGlobalTransform);
+
     const auto& PMesh = Parsed.Mesh;
 
-    FMeshPayloadData Data;
-
-    // Build a minimal MeshDescription for a skeletal mesh
-    FMeshDescription& MD = Data.MeshDescription;
-    FStaticMeshAttributes StaticAttrs(MD);
-    StaticAttrs.Register();
-    FSkeletalMeshAttributes SkelAttrs(MD);
-    SkelAttrs.Register();
-
-    TVertexAttributesRef<FVector3f> VertexPositions = StaticAttrs.GetVertexPositions();
-    TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = StaticAttrs.GetVertexInstanceNormals();
-    TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = StaticAttrs.GetVertexInstanceUVs();
-    TPolygonGroupAttributesRef<FName> PolyGroupMatSlotNames = StaticAttrs.GetPolygonGroupMaterialSlotNames();
-
-    VertexInstanceUVs.SetNumChannels(1);
-
-    // Create vertices
-    TArray<FVertexID> Vertices;
-    Vertices.Reserve(PMesh.Positions.Num());
-    for (const FVector3f& P : PMesh.Positions)
+    // If requester asked for a morph payload, try to identify which morph and serve it
+    if (PayLoadKey.Type == EInterchangeMeshPayLoadType::MORPHTARGET)
     {
-        const FVertexID V = MD.CreateVertex();
-        VertexPositions[V] = P;
-        Vertices.Add(V);
-    }
+        const FString Unique = PayLoadKey.UniqueId;
+        int32 MorphIndex = INDEX_NONE;
 
-    // Create polygon groups per material index used
-    TMap<int32, FPolygonGroupID> MatToPG;
-    auto GetPGForMat = [&](int32 MatIndex)->FPolygonGroupID
-    {
-        if (FPolygonGroupID* Found = MatToPG.Find(MatIndex)) return *Found;
-        const FPolygonGroupID PG = MD.CreatePolygonGroup();
-        const FName SlotName = FName(*FString::Printf(TEXT("MatSlot_%d"), MatIndex));
-        PolyGroupMatSlotNames[PG] = SlotName;
-        MatToPG.Add(MatIndex, PG);
-        return PG;
-    };
-
-    // Build triangles, route into PGs by TriMaterialIndex
-    const int32 TriCount = PMesh.Indices.Num() / 3;
-    for (int32 t = 0; t < TriCount; ++t)
-    {
-        const int32 i0 = PMesh.Indices[t * 3 + 0];
-        const int32 i1 = PMesh.Indices[t * 3 + 1];
-        const int32 i2 = PMesh.Indices[t * 3 + 2];
-
-        const FVertexInstanceID VI0 = MD.CreateVertexInstance(Vertices[i0]);
-        const FVertexInstanceID VI1 = MD.CreateVertexInstance(Vertices[i1]);
-        const FVertexInstanceID VI2 = MD.CreateVertexInstance(Vertices[i2]);
-
-        if (PMesh.Normals.IsValidIndex(i0)) VertexInstanceNormals[VI0] = PMesh.Normals[i0];
-        if (PMesh.Normals.IsValidIndex(i1)) VertexInstanceNormals[VI1] = PMesh.Normals[i1];
-        if (PMesh.Normals.IsValidIndex(i2)) VertexInstanceNormals[VI2] = PMesh.Normals[i2];
-
-        if (PMesh.UV0.IsValidIndex(i0)) VertexInstanceUVs.Set(VI0, 0, PMesh.UV0[i0]);
-        if (PMesh.UV0.IsValidIndex(i1)) VertexInstanceUVs.Set(VI1, 0, PMesh.UV0[i1]);
-        if (PMesh.UV0.IsValidIndex(i2)) VertexInstanceUVs.Set(VI2, 0, PMesh.UV0[i2]);
-
-        const int32 MatIndex = PMesh.TriMaterialIndex.IsValidIndex(t) ? PMesh.TriMaterialIndex[t] : 0;
-        const FPolygonGroupID PG = GetPGForMat(MatIndex);
-        // Reverse winding (glTF->UE handedness)
-        // Note: We also apply an additional mirror in RefFix, which flips handedness again.
-        // So we do NOT reverse the winding here to keep normals facing outward.
-        MD.CreateTriangle(PG, { VI0, VI1, VI2 });
-    }
-
-    // Skin weights and joint names
-    FSkinWeightsVertexAttributesRef SkinWeights = SkelAttrs.GetVertexSkinWeights();
-
-    // Joint names: use parsed bones, fallback to root only
-    Data.JointNames.Reset();
-    if (Parsed.Bones.Num() > 0)
-    {
-        for (const FVRMParsedBone& B : Parsed.Bones)
+        // Expected key format: "VRM_Morph_%d" as created in Translate()
+        const FString Prefix(TEXT("VRM_Morph_"));
+        if (Unique.StartsWith(Prefix))
         {
-            Data.JointNames.Add(B.Name.IsEmpty() ? TEXT("Bone") : B.Name);
-        }
-    }
-    else
-    {
-        Data.JointNames.Add(TEXT("VRM_Root"));
-    }
-
-    UE::AnimationCore::FBoneWeightsSettings Settings;
-    Settings.SetNormalizeType(UE::AnimationCore::EBoneWeightNormalizeType::Always);
-
-    const int32 NumVerts = MD.Vertices().Num();
-    if (PMesh.SkinWeights.Num() == NumVerts && Data.JointNames.Num() > 0)
-    {
-        for (int32 vi = 0; vi < NumVerts; ++vi)
-        {
-            const FVRMParsedMesh::FWeight& W = PMesh.SkinWeights[vi];
-            TArray<UE::AnimationCore::FBoneWeight> BW;
-            BW.Reserve(4);
-            for (int32 k = 0; k < 4; ++k)
+            const FString Suffix = Unique.RightChop(Prefix.Len());
+            if (Suffix.IsNumeric())
             {
-                const float w = W.Weight[k];
-                if (w > 0.0f)
+                MorphIndex = FCString::Atoi(*Suffix);
+            }
+        }
+        else
+        {
+            // Fallback: try parse trailing integer
+            int32 LastUnderscore = INDEX_NONE;
+            if (Unique.FindLastChar(TEXT('_'), LastUnderscore) && LastUnderscore != INDEX_NONE)
+            {
+                const FString Suffix = Unique.Mid(LastUnderscore + 1);
+                if (Suffix.IsNumeric())
                 {
-                    const int32 BoneIndex = FMath::Clamp<int32>(W.BoneIndex[k], 0, Data.JointNames.Num() - 1);
-                    BW.Emplace(BoneIndex, w);
+                    MorphIndex = FCString::Atoi(*Suffix);
                 }
             }
-            SkinWeights.Set(FVertexID(vi), UE::AnimationCore::FBoneWeights::Create(BW, Settings));
         }
-    }
-    else
-    {
-        // Fallback: bind to root
-        const UE::AnimationCore::FBoneWeight RootInfluence(0, 1.0f);
-        const UE::AnimationCore::FBoneWeights RootBinding = UE::AnimationCore::FBoneWeights::Create({ RootInfluence });
-        for (const FVertexID VertexID : MD.Vertices().GetElementIDs())
+
+        UE_LOG(LogTemp, Verbose, TEXT("[VRMInterchange] Morph payload requested: Key='%s' ParsedIndex=%d"), *Unique, MorphIndex);
+
+        if (MorphIndex == INDEX_NONE || !PMesh.Morphs.IsValidIndex(MorphIndex))
         {
-            SkinWeights.Set(VertexID, RootBinding);
+            UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Invalid morph payload request '%s' (index %d out of range)"), *Unique, MorphIndex);
+            return TOptional<UE::Interchange::FMeshPayloadData>();
         }
+
+        const FVRMParsedMorph& PMorph = PMesh.Morphs[MorphIndex];
+
+        // Build a payload MeshDescription that represents the morphed mesh (base + delta)
+        FMeshPayloadData Data;
+        FMeshDescription& MD = Data.MeshDescription;
+        FStaticMeshAttributes StaticAttrs(MD);
+        StaticAttrs.Register();
+        FSkeletalMeshAttributes SkelAttrs(MD);
+        SkelAttrs.Register();
+
+        TVertexAttributesRef<FVector3f> VertexPositions = StaticAttrs.GetVertexPositions();
+        TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = StaticAttrs.GetVertexInstanceNormals();
+        TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = StaticAttrs.GetVertexInstanceUVs();
+        TPolygonGroupAttributesRef<FName> PolyGroupMatSlotNames = StaticAttrs.GetPolygonGroupMaterialSlotNames();
+
+        VertexInstanceUVs.SetNumChannels(1);
+
+        // Create vertices using morphed positions (base + delta)
+        TArray<FVertexID> Vertices;
+        Vertices.Reserve(PMesh.Positions.Num());
+
+        const bool bHaveDeltas = PMorph.DeltaPositions.Num() == PMesh.Positions.Num();
+
+        for (int32 vi = 0; vi < PMesh.Positions.Num(); ++vi)
+        {
+            const FVector3f BaseP = PMesh.Positions[vi];
+            const FVector3f FinalP = bHaveDeltas ? (BaseP + PMorph.DeltaPositions[vi]) : BaseP;
+            const FVertexID V = MD.CreateVertex();
+            VertexPositions[V] = FinalP;
+            Vertices.Add(V);
+        }
+
+        // Create polygon groups per material index used
+        TMap<int32, FPolygonGroupID> MatToPG;
+        auto GetPGForMat = [&](int32 MatIndex)->FPolygonGroupID
+        {
+            if (FPolygonGroupID* Found = MatToPG.Find(MatIndex)) return *Found;
+            const FPolygonGroupID PG = MD.CreatePolygonGroup();
+            const FName SlotName = FName(*FString::Printf(TEXT("MatSlot_%d"), MatIndex));
+            PolyGroupMatSlotNames[PG] = SlotName;
+            MatToPG.Add(MatIndex, PG);
+            return PG;
+        };
+
+        // Build triangles mirroring base mesh topology (same indices)
+        const int32 TriCount = PMesh.Indices.Num() / 3;
+        for (int32 t = 0; t < TriCount; ++t)
+        {
+            const int32 i0 = PMesh.Indices[t * 3 + 0];
+            const int32 i1 = PMesh.Indices[t * 3 + 1];
+            const int32 i2 = PMesh.Indices[t * 3 + 2];
+
+            const FVertexInstanceID VI0 = MD.CreateVertexInstance(Vertices[i0]);
+            const FVertexInstanceID VI1 = MD.CreateVertexInstance(Vertices[i1]);
+            const FVertexInstanceID VI2 = MD.CreateVertexInstance(Vertices[i2]);
+
+            if (PMesh.Normals.IsValidIndex(i0)) VertexInstanceNormals[VI0] = PMesh.Normals[i0];
+            if (PMesh.Normals.IsValidIndex(i1)) VertexInstanceNormals[VI1] = PMesh.Normals[i1];
+            if (PMesh.Normals.IsValidIndex(i2)) VertexInstanceNormals[VI2] = PMesh.Normals[i2];
+
+            if (PMesh.UV0.IsValidIndex(i0)) VertexInstanceUVs.Set(VI0, 0, PMesh.UV0[i0]);
+            if (PMesh.UV0.IsValidIndex(i1)) VertexInstanceUVs.Set(VI1, 0, PMesh.UV0[i1]);
+            if (PMesh.UV0.IsValidIndex(i2)) VertexInstanceUVs.Set(VI2, 0, PMesh.UV0[i2]);
+
+            const int32 MatIndex = PMesh.TriMaterialIndex.IsValidIndex(t) ? PMesh.TriMaterialIndex[t] : 0;
+            const FPolygonGroupID PG = GetPGForMat(MatIndex);
+
+            MD.CreateTriangle(PG, { VI0, VI1, VI2 });
+        }
+
+        // Joint names: use parsed bones, fallback to root only
+        Data.JointNames.Reset();
+        if (Parsed.Bones.Num() > 0)
+        {
+            for (const FVRMParsedBone& B : Parsed.Bones)
+            {
+                Data.JointNames.Add(B.Name.IsEmpty() ? TEXT("Bone") : B.Name);
+            }
+        }
+        else
+        {
+            Data.JointNames.Add(TEXT("VRM_Root"));
+        }
+
+        // Skin weights: copy base mesh weights (same vertex ordering)
+        FSkinWeightsVertexAttributesRef SkinWeights = SkelAttrs.GetVertexSkinWeights();
+        const int32 NumVerts = MD.Vertices().Num();
+        UE::AnimationCore::FBoneWeightsSettings Settings;
+        Settings.SetNormalizeType(UE::AnimationCore::EBoneWeightNormalizeType::Always);
+
+        if (PMesh.SkinWeights.Num() == NumVerts && Data.JointNames.Num() > 0)
+        {
+            for (int32 vi = 0; vi < NumVerts; ++vi)
+            {
+                const FVRMParsedMesh::FWeight& W = PMesh.SkinWeights[vi];
+                TArray<UE::AnimationCore::FBoneWeight> BW;
+                BW.Reserve(4);
+                for (int32 k = 0; k < 4; ++k)
+                {
+                    const float w = W.Weight[k];
+                    if (w > 0.0f)
+                    {
+                        const int32 BoneIndex = FMath::Clamp<int32>(W.BoneIndex[k], 0, Data.JointNames.Num() - 1);
+                        BW.Emplace(BoneIndex, w);
+                    }
+                }
+                SkinWeights.Set(FVertexID(vi), UE::AnimationCore::FBoneWeights::Create(BW, Settings));
+            }
+        }
+        else
+        {
+            // Fallback: bind to root
+            const UE::AnimationCore::FBoneWeight RootInfluence(0, 1.0f);
+            const UE::AnimationCore::FBoneWeights RootBinding = UE::AnimationCore::FBoneWeights::Create({ RootInfluence });
+            for (const FVertexID VertexID : MD.Vertices().GetElementIDs())
+            {
+                SkinWeights.Set(VertexID, RootBinding);
+            }
+        }
+
+        UE_LOG(LogTemp, Verbose, TEXT("[VRMInterchange] Returning MORPHTARGET payload for index %d"), MorphIndex);
+        return Data;
     }
 
-    return Data;
+    // Default path: return merged base skeletal mesh payload (existing behavior)
+    {
+        FMeshPayloadData Data;
+        FMeshDescription& MD = Data.MeshDescription;
+        FStaticMeshAttributes StaticAttrs(MD);
+        StaticAttrs.Register();
+        FSkeletalMeshAttributes SkelAttrs(MD);
+        SkelAttrs.Register();
+
+        TVertexAttributesRef<FVector3f> VertexPositions = StaticAttrs.GetVertexPositions();
+        TVertexInstanceAttributesRef<FVector3f> VertexInstanceNormals = StaticAttrs.GetVertexInstanceNormals();
+        TVertexInstanceAttributesRef<FVector2f> VertexInstanceUVs = StaticAttrs.GetVertexInstanceUVs();
+        TPolygonGroupAttributesRef<FName> PolyGroupMatSlotNames = StaticAttrs.GetPolygonGroupMaterialSlotNames();
+
+        VertexInstanceUVs.SetNumChannels(1);
+
+        // Create vertices
+        TArray<FVertexID> Vertices;
+        Vertices.Reserve(PMesh.Positions.Num());
+        for (const FVector3f& P : PMesh.Positions)
+        {
+            const FVertexID V = MD.CreateVertex();
+            VertexPositions[V] = P;
+            Vertices.Add(V);
+        }
+
+        // Create polygon groups per material index used
+        TMap<int32, FPolygonGroupID> MatToPG;
+        auto GetPGForMat = [&](int32 MatIndex)->FPolygonGroupID
+        {
+            if (FPolygonGroupID* Found = MatToPG.Find(MatIndex)) return *Found;
+            const FPolygonGroupID PG = MD.CreatePolygonGroup();
+            const FName SlotName = FName(*FString::Printf(TEXT("MatSlot_%d"), MatIndex));
+            PolyGroupMatSlotNames[PG] = SlotName;
+            MatToPG.Add(MatIndex, PG);
+            return PG;
+        };
+
+        // Build triangles, route into PGs by TriMaterialIndex
+        const int32 TriCount = PMesh.Indices.Num() / 3;
+        for (int32 t = 0; t < TriCount; ++t)
+        {
+            const int32 i0 = PMesh.Indices[t * 3 + 0];
+            const int32 i1 = PMesh.Indices[t * 3 + 1];
+            const int32 i2 = PMesh.Indices[t * 3 + 2];
+
+            const FVertexInstanceID VI0 = MD.CreateVertexInstance(Vertices[i0]);
+            const FVertexInstanceID VI1 = MD.CreateVertexInstance(Vertices[i1]);
+            const FVertexInstanceID VI2 = MD.CreateVertexInstance(Vertices[i2]);
+
+            if (PMesh.Normals.IsValidIndex(i0)) VertexInstanceNormals[VI0] = PMesh.Normals[i0];
+            if (PMesh.Normals.IsValidIndex(i1)) VertexInstanceNormals[VI1] = PMesh.Normals[i1];
+            if (PMesh.Normals.IsValidIndex(i2)) VertexInstanceNormals[VI2] = PMesh.Normals[i2];
+
+            if (PMesh.UV0.IsValidIndex(i0)) VertexInstanceUVs.Set(VI0, 0, PMesh.UV0[i0]);
+            if (PMesh.UV0.IsValidIndex(i1)) VertexInstanceUVs.Set(VI1, 0, PMesh.UV0[i1]);
+            if (PMesh.UV0.IsValidIndex(i2)) VertexInstanceUVs.Set(VI2, 0, PMesh.UV0[i2]);
+
+            const int32 MatIndex = PMesh.TriMaterialIndex.IsValidIndex(t) ? PMesh.TriMaterialIndex[t] : 0;
+            const FPolygonGroupID PG = GetPGForMat(MatIndex);
+            // Reverse winding (glTF->UE handedness)
+            // Note: We also apply an additional mirror in RefFix, which flips handedness again.
+            // So we do NOT reverse the winding here to keep normals facing outward.
+            MD.CreateTriangle(PG, { VI0, VI1, VI2 });
+        }
+
+        // Skin weights and joint names
+        FSkinWeightsVertexAttributesRef SkinWeights = SkelAttrs.GetVertexSkinWeights();
+
+        // Joint names: use parsed bones, fallback to root only
+        Data.JointNames.Reset();
+        if (Parsed.Bones.Num() > 0)
+        {
+            for (const FVRMParsedBone& B : Parsed.Bones)
+            {
+                Data.JointNames.Add(B.Name.IsEmpty() ? TEXT("Bone") : B.Name);
+            }
+        }
+        else
+        {
+            Data.JointNames.Add(TEXT("VRM_Root"));
+        }
+
+        UE::AnimationCore::FBoneWeightsSettings Settings;
+        Settings.SetNormalizeType(UE::AnimationCore::EBoneWeightNormalizeType::Always);
+
+        const int32 NumVerts = MD.Vertices().Num();
+        if (PMesh.SkinWeights.Num() == NumVerts && Data.JointNames.Num() > 0)
+        {
+            for (int32 vi = 0; vi < NumVerts; ++vi)
+            {
+                const FVRMParsedMesh::FWeight& W = PMesh.SkinWeights[vi];
+                TArray<UE::AnimationCore::FBoneWeight> BW;
+                BW.Reserve(4);
+                for (int32 k = 0; k < 4; ++k)
+                {
+                    const float w = W.Weight[k];
+                    if (w > 0.0f)
+                    {
+                        const int32 BoneIndex = FMath::Clamp<int32>(W.BoneIndex[k], 0, Data.JointNames.Num() - 1);
+                        BW.Emplace(BoneIndex, w);
+                    }
+                }
+                SkinWeights.Set(FVertexID(vi), UE::AnimationCore::FBoneWeights::Create(BW, Settings));
+            }
+        }
+        else
+        {
+            // Fallback: bind to root
+            const UE::AnimationCore::FBoneWeight RootInfluence(0, 1.0f);
+            const UE::AnimationCore::FBoneWeights RootBinding = UE::AnimationCore::FBoneWeights::Create({ RootInfluence });
+            for (const FVertexID VertexID : MD.Vertices().GetElementIDs())
+            {
+                SkinWeights.Set(VertexID, RootBinding);
+            }
+        }
+
+        return Data;
+    }
 }
 
 TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
@@ -816,6 +1015,136 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         }
     }
 
+    // --- Parse morph targets and merge primitive targets by name (preferred) with an index-based fallback
+    {
+        const int32 TotalVertices = Out.Mesh.Positions.Num();
+        if (TotalVertices > 0)
+        {
+            // Map target name -> global morph index
+            TMap<FString, int32> NameToIndex;
+            // Keep ordered list of names to create Out.Mesh.Morphs in deterministic order
+            TArray<FString> OrderedNames;
+
+            // First pass: discover all target names (if available) and build mapping.
+            for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+            {
+                const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+                // Some cgltf versions expose mesh->target_names/target_names_count; guard use if present.
+                const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+                for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+                {
+                    const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+                    for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+                    {
+                        FString TargetName;
+                        if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                        {
+                            TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                        }
+                        // If no name available, use deterministic index-based fallback so unnamed targets still group by index
+                        if (TargetName.IsEmpty())
+                        {
+                            TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                        }
+
+                        if (!NameToIndex.Contains(TargetName))
+                        {
+                            const int32 NewIdx = OrderedNames.Num();
+                            OrderedNames.Add(TargetName);
+                            NameToIndex.Add(TargetName, NewIdx);
+                        }
+                    }
+                }
+            }
+
+            // If no targets discovered, nothing to do.
+            if (OrderedNames.Num() > 0)
+            {
+                // Allocate global morphs and zero the delta arrays
+                Out.Mesh.Morphs.SetNum(OrderedNames.Num());
+                for (int32 mi = 0; mi < OrderedNames.Num(); ++mi)
+                {
+                    Out.Mesh.Morphs[mi].Name = OrderedNames[mi];
+                    Out.Mesh.Morphs[mi].DeltaPositions.SetNumZeroed(TotalVertices);
+                }
+
+                // Second pass: read per-primitive deltas and merge into the global morph identified by name (or fallback index-name)
+                int32 VertexBase2 = 0;
+                for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+                {
+                    const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+                    const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+                    for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+                    {
+                        const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+
+                        // POSITION accessor to determine this primitive's vertex count
+                        int32 PrimVertCount = 0;
+                        if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
+                        {
+                            if (Apos->data)
+                            {
+                                PrimVertCount = (int32)Apos->data->count;
+                            }
+                        }
+
+                        for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+                        {
+                            // Determine global morph name/key for this primitive target
+                            FString TargetName;
+                            if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                            {
+                                TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                            }
+                            if (TargetName.IsEmpty())
+                            {
+                                TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                            }
+
+                            const int32* FoundGlobal = NameToIndex.Find(TargetName);
+                            if (!FoundGlobal)
+                            {
+                                // Shouldn't happen, but guard
+                                continue;
+                            }
+                            const int32 GlobalMorphIndex = *FoundGlobal;
+
+                            const cgltf_morph_target& Tgt = Prim2->targets[ti];
+                            const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
+                            if (!PosAcc || !PosAcc->count)
+                            {
+                                continue;
+                            }
+
+                            TArray<FVector3f> DeltaLocal;
+                            ReadAccessorVec3f(*PosAcc, DeltaLocal);
+
+                            if (DeltaLocal.Num() != PrimVertCount)
+                            {
+                                UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
+                                continue;
+                            }
+
+                            for (int32 v = 0; v < PrimVertCount; ++v)
+                            {
+                                const FVector3f Src = DeltaLocal[v];
+                                const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
+                                const int32 GlobalIndex = VertexBase2 + v;
+                                if (Out.Mesh.Morphs.IsValidIndex(GlobalMorphIndex) && Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions.IsValidIndex(GlobalIndex))
+                                {
+                                    Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions[GlobalIndex] = Conv;
+                                }
+                            }
+                        }
+
+                        VertexBase2 += PrimVertCount;
+                    }
+                }
+            }
+        }
+    }
     // Images: load all images referenced by the glTF (not only the first material)
     if (Data->images_count > 0)
     {
