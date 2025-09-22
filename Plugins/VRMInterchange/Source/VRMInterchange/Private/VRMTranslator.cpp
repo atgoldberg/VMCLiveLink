@@ -816,6 +816,78 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         }
     }
 
+    // --- Parse morph targets (per-primitive) and store as parsed morphs on the merged mesh
+    // We'll create one parsed morph per primitive-target. Each parsed morph gets a global-size DeltaPositions array
+    // with deltas filled for the primitive's vertex range. This is conservative and preserves existing behavior.
+    {
+        const int32 TotalVertices = Out.Mesh.Positions.Num();
+        if (TotalVertices > 0)
+        {
+            int32 VertexBase2 = 0;
+            for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+            {
+                const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+                for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+                {
+                    const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+
+                    // POSITION accessor to determine this primitive's vertex count
+                    int32 PrimVertCount = 0;
+                    if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
+                    {
+                        if (Apos->data)
+                        {
+                            PrimVertCount = (int32)Apos->data->count;
+                        }
+                    }
+
+                    // For each morph target on this primitive, read position target deltas
+                    for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+                    {
+                        const cgltf_morph_target& Tgt = Prim2->targets[ti];
+                        const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
+                        if (!PosAcc || !PosAcc->count)
+                        {
+                            // No position target for this morph, skip
+                            continue;
+                        }
+
+                        // Read deltas for this primitive
+                        TArray<FVector3f> DeltaLocal;
+                        ReadAccessorVec3f(*PosAcc, DeltaLocal);
+
+                        if (DeltaLocal.Num() != PrimVertCount)
+                        {
+                            UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
+                            continue;
+                        }
+
+                        // Create parsed morph and initialize global-size delta array (zeros)
+                        FVRMParsedMorph LocalMorph;
+                        LocalMorph.Name = FString::Printf(TEXT("morph_p%d_%d"), (int)mi2, (int)ti);
+                        LocalMorph.DeltaPositions.SetNumZeroed(TotalVertices);
+
+                        // Convert and write deltas into global array for this primitive vertex range
+                        for (int32 v = 0; v < PrimVertCount; ++v)
+                        {
+                            const FVector3f Src = DeltaLocal[v];
+                            const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
+                            const int32 GlobalIndex = VertexBase2 + v;
+                            if (LocalMorph.DeltaPositions.IsValidIndex(GlobalIndex))
+                            {
+                                LocalMorph.DeltaPositions[GlobalIndex] = Conv;
+                            }
+                        }
+
+                        Out.Mesh.Morphs.Add(MoveTemp(LocalMorph));
+                    }
+
+                    VertexBase2 += PrimVertCount;
+                }
+            }
+        }
+    }
+
     // Images: load all images referenced by the glTF (not only the first material)
     if (Data->images_count > 0)
     {
