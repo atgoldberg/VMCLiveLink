@@ -338,6 +338,38 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
     SkelActorNode->SetCustomAssetInstanceUid(MeshNodeUid);
     SkelActorNode->SetCustomLocalTransform(&NodeContainer, FTransform::Identity);
 
+    // Create Interchange mesh nodes for each parsed morph target so the pipeline can request morph payloads
+    for (int32 MorphIndex = 0; MorphIndex < Parsed.Mesh.Morphs.Num(); ++MorphIndex)
+    {
+        const FVRMParsedMorph& PMorph = Parsed.Mesh.Morphs[MorphIndex];
+        // Make a node UID unique to this morph
+        const FString MorphNodeUid = MakeNodeUid(*FString::Printf(TEXT("Morph_%d"), MorphIndex));
+        // Fallback to generated name if none present
+        const FString MorphDisplayName = PMorph.Name.IsEmpty() ? FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex) : PMorph.Name;
+
+        // Skip if node already exists
+        if (const UInterchangeMeshNode* Existing = Cast<UInterchangeMeshNode>(NodeContainer.GetNode(MorphNodeUid)))
+        {
+            // Ensure dependency on mesh
+            MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
+            continue;
+        }
+
+        UInterchangeMeshNode* MorphNode = NewObject<UInterchangeMeshNode>(&NodeContainer);
+        NodeContainer.SetupNode(MorphNode, MorphNodeUid, *MorphDisplayName, EInterchangeNodeContainerType::TranslatedAsset);
+
+        // Assign a unique payload key so the pipeline can request payload data for this morph (payload handling can be implemented later)
+        const FString MorphPayloadKey = FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex);
+        MorphNode->SetPayLoadKey(MorphPayloadKey, EInterchangeMeshPayLoadType::MORPHTARGET);
+
+        // Mark as morph target and set its name
+        MorphNode->SetMorphTarget(true);
+        MorphNode->SetMorphTargetName(MorphDisplayName);
+
+        // Add dependency on the main mesh so the pipeline knows this morph belongs to the mesh
+        MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
+    }
+
     return true;
 }
 
