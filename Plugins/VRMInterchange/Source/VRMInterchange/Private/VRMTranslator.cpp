@@ -46,6 +46,9 @@ static void ReadIndicesUInt32(const cgltf_accessor& A, TArray<uint32>& Out);
 static FTransform NodeTRS(const cgltf_node* N);
 static void Normalize4(float W[4]);
 
+// New validation helper (centralized checks)
+static bool ValidateCgltfData(const cgltf_data* Data, FString& OutError);
+
 // New forward for extracted image loader
 static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename, FVRMParsedModel& Out);
 
@@ -974,9 +977,10 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
     }
     cgltf_data* Data = ScopedData.Data;
 
-    if (Data->meshes_count == 0 || Data->nodes_count == 0)
+    // Centralized validation checks
+    if (!ValidateCgltfData(Data, ParseError))
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] No meshes or nodes in file."));
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] %s"), *ParseError);
         return false;
     }
 
@@ -1134,6 +1138,57 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
             M.AlphaMode = 2;
         }
         Out.Materials.Add(M);
+    }
+
+    return true;
+}
+
+// New validation helper (centralized checks)
+static bool ValidateCgltfData(const cgltf_data* Data, FString& OutError)
+{
+    OutError.Empty();
+    if (!Data)
+    {
+        OutError = TEXT("No glTF data (null).");
+        return false;
+    }
+
+    if (Data->meshes_count == 0 || Data->nodes_count == 0)
+    {
+        OutError = TEXT("No meshes or nodes in file.");
+        return false;
+    }
+
+    // Ensure every mesh has at least one primitive and each primitive has a POSITION attribute.
+    for (size_t mi = 0; mi < Data->meshes_count; ++mi)
+    {
+        const cgltf_mesh* Mesh = &Data->meshes[mi];
+        if (Mesh->primitives_count == 0)
+        {
+            OutError = FString::Printf(TEXT("Mesh %d contains no primitives."), int(mi));
+            return false;
+        }
+
+        for (size_t pi = 0; pi < Mesh->primitives_count; ++pi)
+        {
+            const cgltf_primitive* Prim = &Mesh->primitives[pi];
+
+            bool bHasPosition = false;
+            for (size_t ai = 0; ai < Prim->attributes_count; ++ai)
+            {
+                if (Prim->attributes[ai].type == cgltf_attribute_type_position)
+                {
+                    bHasPosition = true;
+                    break;
+                }
+            }
+
+            if (!bHasPosition)
+            {
+                OutError = FString::Printf(TEXT("Primitive %d.%d missing POSITION attribute."), int(mi), int(pi));
+                return false;
+            }
+        }
     }
 
     return true;
