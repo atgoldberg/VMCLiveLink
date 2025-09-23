@@ -61,6 +61,12 @@ static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out);
 // New helper: reset parsed model to a known default state
 static void ResetParsedModel(FVRMParsedModel& Out);
 
+// New helper: build mapping NodeIndex -> BoneIndex from skin/joints
+static TMap<int32,int32> BuildNodeToBoneMap(const cgltf_skin* Skin, const cgltf_data* Data);
+
+// Forward declaration for bone population helper
+static void PopulateBonesFromSkin(const cgltf_skin* Skin, const cgltf_data* Data, FVRMParsedModel& Out);
+
 // Simple RAII wrapper to ensure cgltf_free is always called
 struct FCgltfScoped
 {
@@ -836,6 +842,20 @@ static FCgltfScoped ParseCgltfFile(const FString& Filename, FString& OutError)
     return ScopedData;
 }
 
+// Implementation: Build NodeIndex -> BoneIndex map (isolates mapping logic)
+static TMap<int32, int32> BuildNodeToBoneMap(const cgltf_skin* Skin, const cgltf_data* Data)
+{
+    TMap<int32, int32> Map;
+    if (!Skin || !Data) return Map;
+    for (size_t ji = 0; ji < Skin->joints_count; ++ji)
+    {
+        // compute node index relative to Data->nodes array (same approach as original code)
+        const int32 NodeIndex = int32(Skin->joints[ji] - Data->nodes);
+        Map.Add(NodeIndex, int32(ji));
+    }
+    return Map;
+}
+
 static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out)
 {
     if (!Data) return false;
@@ -991,83 +1011,15 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
     // Assume single skin is used by all mesh nodes in VRM
     const cgltf_skin* Skin = (Data->skins_count > 0) ? &Data->skins[0] : nullptr;
 
-    // Pre-build NodeIndex->BoneIndex mapping if skin exists
-    TMap<int32, int32> NodeToBone;
-    if (Skin)
+    // Pre-build NodeIndex->BoneIndex mapping if skin exists (now using extracted helper)
+    TMap<int32, int32> NodeToBone = BuildNodeToBoneMap(Skin, Data);
+
+    // Populate bones via helper (names, parents, UE-space local binds, reference pose fix)
+    PopulateBonesFromSkin(Skin, Data, Out);
+    if (Skin && Out.Bones.Num() == 0)
     {
-        for (size_t ji = 0; ji < Skin->joints_count; ++ji)
-        {
-            const int32 NodeIndex = int32(Skin->joints[ji] - Data->nodes);
-            NodeToBone.Add(NodeIndex, int32(ji));
-        }
-
-        // Build bones array from skin joints
-        Out.Bones.Reset();
-        Out.Bones.SetNum(int32(Skin->joints_count));
-        for (int32 ji = 0; ji < int32(Skin->joints_count); ++ji)
-        {
-            const cgltf_node* J = Skin->joints[ji];
-            FVRMParsedBone& B = Out.Bones[ji];
-            B.Name = J && J->name ? FString(UTF8_TO_TCHAR(J->name)) : FString::Printf(TEXT("Joint_%d"), ji);
-
-            // Find parent joint within the skin's joint list
-            B.Parent = INDEX_NONE;
-            const cgltf_node* P = J ? J->parent : nullptr;
-            while (P)
-            {
-                bool bFound = false;
-                for (int32 k = 0; k < int32(Skin->joints_count); ++k)
-                {
-                    if (Skin->joints[k] == P)
-                    {
-                        B.Parent = k;
-                        bFound = true;
-                        break;
-                    }
-                }
-                if (bFound) { break; }
-                P = P->parent;
-            }
-
-            // Convert local bind from glTF to UE axes
-            FTransform Local = NodeTRS(J);
-            FVector T = GltfToUE_Vector(Local.GetTranslation()) * Out.GlobalScale;
-            FQuat R = GltfToUE_Quat(Local.GetRotation());
-            FVector S = GltfToUE_Vector(Local.GetScale3D());
-            B.LocalBind = FTransform(R, T, S);
-        }
-
-        // Rebuild bone local binds so that:
-        //  - All local rotations are identity
-        //  - Global joint positions are corrected to face +Y and be unmirrored L/R
-        {
-            const int32 NumBones = Out.Bones.Num();
-            TArray<FTransform> GlobalXf; GlobalXf.SetNum(NumBones);
-            TArray<FVector>    FixedGlobalPos; FixedGlobalPos.SetNum(NumBones);
-
-            // Compute original global transforms from current local binds
-            for (int32 i = 0; i < NumBones; ++i)
-            {
-                const int32 Parent = Out.Bones[i].Parent;
-                const FTransform ParentGlobal = (Parent == INDEX_NONE) ? FTransform::Identity : GlobalXf[Parent];
-                GlobalXf[i] = Out.Bones[i].LocalBind * ParentGlobal;
-                // Apply reference fix to the global position
-                FixedGlobalPos[i] = RefFix_Vector(GlobalXf[i].GetTranslation());
-            }
-
-            // Recreate local binds as pure translations (identity rotation), preserving corrected positions
-            for (int32 i = 0; i < NumBones; ++i)
-            {
-                const int32 Parent = Out.Bones[i].Parent;
-                const FVector ParentPos = (Parent == INDEX_NONE) ? FVector::ZeroVector : FixedGlobalPos[Parent];
-                const FVector LocalT = FixedGlobalPos[i] - ParentPos;
-                Out.Bones[i].LocalBind = FTransform(FQuat::Identity, LocalT, FVector(1,1,1));
-            }
-        }
-    }
-    else
-    {
-        Out.Bones.Reset();
+        // Preserve previous failure behavior when a skin exists but no joints were produced
+        return false;
     }
 
     // Merge all primitives from all meshes (extracted)
@@ -1522,4 +1474,87 @@ static void ResetParsedModel(FVRMParsedModel& Out)
     Out.Mesh.Morphs.Reset();
 
     Out.Bones.Reset();
+}
+
+// Populate bones array from a cgltf_skin: names, parent indices and local binds converted to UE space.
+// Also performs the "reference pose fix" that zeroes rotations and corrects global positions.
+static void PopulateBonesFromSkin(const cgltf_skin* Skin, const cgltf_data* Data, FVRMParsedModel& Out)
+{
+    if (!Skin || !Data)
+    {
+        Out.Bones.Reset();
+        return;
+    }
+
+    // Allocate bones array
+    Out.Bones.Reset();
+    Out.Bones.SetNum(int32(Skin->joints_count));
+
+    // First pass: set names, find parent indices within the skin joints list and convert local TRS -> UE space
+    for (int32 ji = 0; ji < int32(Skin->joints_count); ++ji)
+    {
+        const cgltf_node* J = Skin->joints[ji];
+        FVRMParsedBone& B = Out.Bones[ji];
+
+        // Name
+        B.Name = (J && J->name) ? FString(UTF8_TO_TCHAR(J->name)) : FString::Printf(TEXT("Joint_%d"), ji);
+
+        // Parent: find the parent node inside the skin->joints array, or INDEX_NONE
+        B.Parent = INDEX_NONE;
+        const cgltf_node* P = J ? J->parent : nullptr;
+        while (P)
+        {
+            bool bFound = false;
+            for (int32 k = 0; k < int32(Skin->joints_count); ++k)
+            {
+                if (Skin->joints[k] == P)
+                {
+                    B.Parent = k;
+                    bFound = true;
+                    break;
+                }
+            }
+            if (bFound) { break; }
+            P = P->parent;
+        }
+
+        // Convert local bind TRS from glTF to UE axes and apply global scale
+        FTransform Local = NodeTRS(J);
+        FVector T = GltfToUE_Vector(Local.GetTranslation()) * Out.GlobalScale;
+        FQuat R = GltfToUE_Quat(Local.GetRotation());
+        FVector S = GltfToUE_Vector(Local.GetScale3D());
+        B.LocalBind = FTransform(R, T, S);
+    }
+
+    // Second pass: rebuild local binds so that rotations are identity and positions are corrected
+    // This preserves corrected global positions while producing pure-translation local binds.
+    {
+        const int32 NumBones = Out.Bones.Num();
+        if (NumBones == 0) return;
+
+        TArray<FTransform> GlobalXf;
+        GlobalXf.SetNum(NumBones);
+        TArray<FVector> FixedGlobalPos;
+        FixedGlobalPos.SetNum(NumBones);
+
+        // Compute original global transforms from current local binds
+        for (int32 i = 0; i < NumBones; ++i)
+        {
+            const int32 Parent = Out.Bones[i].Parent;
+            const FTransform ParentGlobal = (Parent == INDEX_NONE) ? FTransform::Identity : GlobalXf[Parent];
+            GlobalXf[i] = Out.Bones[i].LocalBind * ParentGlobal;
+
+            // Apply reference fix to the global position (unmirror and rotate to +Y forward)
+            FixedGlobalPos[i] = RefFix_Vector(GlobalXf[i].GetTranslation());
+        }
+
+        // Recreate local binds as pure translations (identity rotation), preserving corrected positions
+        for (int32 i = 0; i < NumBones; ++i)
+        {
+            const int32 Parent = Out.Bones[i].Parent;
+            const FVector ParentPos = (Parent == INDEX_NONE) ? FVector::ZeroVector : FixedGlobalPos[Parent];
+            const FVector LocalT = FixedGlobalPos[i] - ParentPos;
+            Out.Bones[i].LocalBind = FTransform(FQuat::Identity, LocalT, FVector(1.0f, 1.0f, 1.0f));
+        }
+    }
 }
