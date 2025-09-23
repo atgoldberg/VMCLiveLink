@@ -29,9 +29,10 @@ public class VRMInterchange : ModuleRules
             "StaticMeshDescription",
             "SkeletalMeshDescription", // FSkeletalMeshAttributes and skin weights
             "AnimationCore",           // UE::AnimationCore::FBoneWeights
-            // If you use FStaticMeshOperations in your cpp:
-            // (it lives in StaticMeshDescription; above already covers it)
-            "ImageWrapper" // for ImageWrapperModule.h (used by translator)
+            "ImageWrapper",            // for ImageWrapperModule.h (used by translator)
+            "Json"                     // for FJsonSerializer/FJsonReader/etc.
+            // If you start using FJsonObjectConverter:
+            // "JsonUtilities"
         });
 
         if (Target.bBuildEditor)
@@ -53,7 +54,14 @@ public class VRMInterchange : ModuleRules
                 "ImageWrapper",
                 "Slate",
                 "SlateCore",
-                "Projects"
+                "Projects",
+                "Json", // ensure editor build also links Json
+
+                // <- Editor-only modules required by VRMSpringBonesPostImportPipeline.cpp
+                "AssetRegistry",
+                "AssetTools",
+                // Add "UnrealEd" only if needed (many editor APIs are in UnrealEd)
+                // "UnrealEd",
             });
         }
 
