@@ -58,6 +58,9 @@ static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* 
 // New forward for extracted morph-target merge phase
 static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out);
 
+// New helper: reset parsed model to a known default state
+static void ResetParsedModel(FVRMParsedModel& Out);
+
 // Simple RAII wrapper to ensure cgltf_free is always called
 struct FCgltfScoped
 {
@@ -965,7 +968,8 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
 {
     const FString Filename = GetSourceData()->GetFilename();
 
-    Out.GlobalScale = 100.0f;
+    // Use centralized reset to set defaults and clear arrays
+    ResetParsedModel(Out);
 
     // Use helper to parse/load/validate the file and obtain RAII-managed cgltf_data
     FString ParseError;
@@ -986,16 +990,6 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
 
     // Assume single skin is used by all mesh nodes in VRM
     const cgltf_skin* Skin = (Data->skins_count > 0) ? &Data->skins[0] : nullptr;
-
-    // Reset outputs
-    Out.Materials.Reset();
-    Out.Images.Reset();
-    Out.Mesh.Positions.Reset();
-    Out.Mesh.Normals.Reset();
-    Out.Mesh.UV0.Reset();
-    Out.Mesh.Indices.Reset();
-    Out.Mesh.SkinWeights.Reset();
-    Out.Mesh.TriMaterialIndex.Reset();
 
     // Pre-build NodeIndex->BoneIndex mapping if skin exists
     TMap<int32, int32> NodeToBone;
@@ -1508,4 +1502,24 @@ static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out)
             VertexBase2 += PrimVertCount;
         }
     }
+}
+
+// Implementation: reset parsed model to defaults and clear all arrays
+static void ResetParsedModel(FVRMParsedModel& Out)
+{
+    // Default global scale used throughout the translator
+    Out.GlobalScale = 100.0f;
+
+    Out.Materials.Reset();
+    Out.Images.Reset();
+
+    Out.Mesh.Positions.Reset();
+    Out.Mesh.Normals.Reset();
+    Out.Mesh.UV0.Reset();
+    Out.Mesh.Indices.Reset();
+    Out.Mesh.SkinWeights.Reset();
+    Out.Mesh.TriMaterialIndex.Reset();
+    Out.Mesh.Morphs.Reset();
+
+    Out.Bones.Reset();
 }
