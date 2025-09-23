@@ -52,6 +52,9 @@ static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename,
 // New forward for extracted primitive-merge phase
 static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out);
 
+// New forward for extracted morph-target merge phase
+static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out);
+
 // Simple RAII wrapper to ensure cgltf_free is always called
 struct FCgltfScoped
 {
@@ -1076,136 +1079,8 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         return false;
     }
 
-    // --- Parse morph targets and merge primitive targets by name (preferred) with an index-based fallback
-    {
-        const int32 TotalVertices = Out.Mesh.Positions.Num();
-        if (TotalVertices > 0)
-        {
-            // Map target name -> global morph index
-            TMap<FString, int32> NameToIndex;
-            // Keep ordered list of names to create Out.Mesh.Morphs in deterministic order
-            TArray<FString> OrderedNames;
-
-            // First pass: discover all target names (if available) and build mapping.
-            for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
-            {
-                const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
-                // Some cgltf versions expose mesh->target_names/target_names_count; guard use if present.
-                const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
-
-                for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
-                {
-                    const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
-                    for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
-                    {
-                        FString TargetName;
-                        if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
-                        {
-                            TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
-                        }
-                        // If no name available, use deterministic index-based fallback so unnamed targets still group by index
-                        if (TargetName.IsEmpty())
-                        {
-                            TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
-                        }
-
-                        if (!NameToIndex.Contains(TargetName))
-                        {
-                            const int32 NewIdx = OrderedNames.Num();
-                            OrderedNames.Add(TargetName);
-                            NameToIndex.Add(TargetName, NewIdx);
-                        }
-                    }
-                }
-            }
-
-            // If no targets discovered, nothing to do.
-            if (OrderedNames.Num() > 0)
-            {
-                // Allocate global morphs and zero the delta arrays
-                Out.Mesh.Morphs.SetNum(OrderedNames.Num());
-                for (int32 mi = 0; mi < OrderedNames.Num(); ++mi)
-                {
-                    Out.Mesh.Morphs[mi].Name = OrderedNames[mi];
-                    Out.Mesh.Morphs[mi].DeltaPositions.SetNumZeroed(TotalVertices);
-                }
-
-                // Second pass: read per-primitive deltas and merge into the global morph identified by name (or fallback index-name)
-                int32 VertexBase2 = 0;
-                for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
-                {
-                    const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
-                    const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
-
-                    for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
-                    {
-                        const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
-
-                        // POSITION accessor to determine this primitive's vertex count
-                        int32 PrimVertCount = 0;
-                        if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
-                        {
-                            if (Apos->data)
-                            {
-                                PrimVertCount = (int32)Apos->data->count;
-                            }
-                        }
-
-                        for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
-                        {
-                            // Determine global morph name/key for this primitive target
-                            FString TargetName;
-                            if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
-                            {
-                                TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
-                            }
-                            if (TargetName.IsEmpty())
-                            {
-                                TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
-                            }
-
-                            const int32* FoundGlobal = NameToIndex.Find(TargetName);
-                            if (!FoundGlobal)
-                            {
-                                // Shouldn't happen, but guard
-                                continue;
-                            }
-                            const int32 GlobalMorphIndex = *FoundGlobal;
-
-                            const cgltf_morph_target& Tgt = Prim2->targets[ti];
-                            const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
-                            if (!PosAcc || !PosAcc->count)
-                            {
-                                continue;
-                            }
-
-                            TArray<FVector3f> DeltaLocal;
-                            ReadAccessorVec3f(*PosAcc, DeltaLocal);
-
-                            if (DeltaLocal.Num() != PrimVertCount)
-                            {
-                                UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
-                                continue;
-                            }
-
-                            for (int32 v = 0; v < PrimVertCount; ++v)
-                            {
-                                const FVector3f Src = DeltaLocal[v];
-                                const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
-                                const int32 GlobalIndex = VertexBase2 + v;
-                                if (Out.Mesh.Morphs.IsValidIndex(GlobalMorphIndex) && Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions.IsValidIndex(GlobalIndex))
-                                {
-                                    Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions[GlobalIndex] = Conv;
-                                }
-                            }
-                        }
-
-                        VertexBase2 += PrimVertCount;
-                    }
-                }
-            }
-        }
-    }
+    // Parse morph targets (extracted helper) — must run after primitives merged
+    ParseMorphTargets(Data, Out);
 
     // Images: use extracted helper
     if (Data->images_count > 0)
@@ -1448,4 +1323,134 @@ static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename,
         }
     }
     return true;
+}
+
+static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out)
+{
+    if (!Data) return;
+
+    const int32 TotalVertices = Out.Mesh.Positions.Num();
+    if (TotalVertices <= 0) return;
+
+    // Map target name -> global morph index
+    TMap<FString, int32> NameToIndex;
+    // Keep ordered list of names to create Out.Mesh.Morphs in deterministic order
+    TArray<FString> OrderedNames;
+
+    // First pass: discover all target names (if available) and build mapping.
+    for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+    {
+        const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+        const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+        for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+        {
+            const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+            for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+            {
+                FString TargetName;
+                if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                {
+                    TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                }
+                // If no name available, use deterministic index-based fallback so unnamed targets still group by index
+                if (TargetName.IsEmpty())
+                {
+                    TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                }
+
+                if (!NameToIndex.Contains(TargetName))
+                {
+                    const int32 NewIdx = OrderedNames.Num();
+                    OrderedNames.Add(TargetName);
+                    NameToIndex.Add(TargetName, NewIdx);
+                }
+            }
+        }
+    }
+
+    // If no targets discovered, nothing to do.
+    if (OrderedNames.Num() == 0) return;
+
+    // Allocate global morphs and zero the delta arrays
+    Out.Mesh.Morphs.SetNum(OrderedNames.Num());
+    for (int32 mi = 0; mi < OrderedNames.Num(); ++mi)
+    {
+        Out.Mesh.Morphs[mi].Name = OrderedNames[mi];
+        Out.Mesh.Morphs[mi].DeltaPositions.SetNumZeroed(TotalVertices);
+    }
+
+    // Second pass: read per-primitive deltas and merge into the global morph identified by name (or fallback index-name)
+    int32 VertexBase2 = 0;
+    for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+    {
+        const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+        const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+        for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+        {
+            const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+
+            // POSITION accessor to determine this primitive's vertex count
+            int32 PrimVertCount = 0;
+            if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
+            {
+                if (Apos->data)
+                {
+                    PrimVertCount = (int32)Apos->data->count;
+                }
+            }
+
+            for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+            {
+                // Determine global morph name/key for this primitive target
+                FString TargetName;
+                if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                {
+                    TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                }
+                if (TargetName.IsEmpty())
+                {
+                    TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                }
+
+                const int32* FoundGlobal = NameToIndex.Find(TargetName);
+                if (!FoundGlobal)
+                {
+                    // Shouldn't happen, but guard
+                    continue;
+                }
+                const int32 GlobalMorphIndex = *FoundGlobal;
+
+                const cgltf_morph_target& Tgt = Prim2->targets[ti];
+                const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
+                if (!PosAcc || !PosAcc->count)
+                {
+                    continue;
+                }
+
+                TArray<FVector3f> DeltaLocal;
+                ReadAccessorVec3f(*PosAcc, DeltaLocal);
+
+                if (DeltaLocal.Num() != PrimVertCount)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
+                    continue;
+                }
+
+                for (int32 v = 0; v < PrimVertCount; ++v)
+                {
+                    const FVector3f Src = DeltaLocal[v];
+                    const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
+                    const int32 GlobalIndex = VertexBase2 + v;
+                    if (Out.Mesh.Morphs.IsValidIndex(GlobalMorphIndex) && Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions.IsValidIndex(GlobalIndex))
+                    {
+                        Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions[GlobalIndex] = Conv;
+                    }
+                }
+            }
+
+            VertexBase2 += PrimVertCount;
+        }
+    }
 }
