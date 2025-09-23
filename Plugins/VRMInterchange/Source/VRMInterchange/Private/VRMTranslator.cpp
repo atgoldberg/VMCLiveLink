@@ -46,6 +46,32 @@ static void ReadIndicesUInt32(const cgltf_accessor& A, TArray<uint32>& Out);
 static FTransform NodeTRS(const cgltf_node* N);
 static void Normalize4(float W[4]);
 
+// New forward for extracted image loader
+static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename, FVRMParsedModel& Out);
+
+// New forward for extracted primitive-merge phase
+static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out);
+
+// Simple RAII wrapper to ensure cgltf_free is always called
+struct FCgltfScoped
+{
+    cgltf_data* Data = nullptr;
+    explicit FCgltfScoped(cgltf_data* In) : Data(In) {}
+    ~FCgltfScoped() { if (Data) cgltf_free(Data); }
+
+    FCgltfScoped(const FCgltfScoped&) = delete;
+    FCgltfScoped& operator=(const FCgltfScoped&) = delete;
+
+    FCgltfScoped(FCgltfScoped&& Other) noexcept : Data(Other.Data) { Other.Data = nullptr; }
+    FCgltfScoped& operator=(FCgltfScoped&& Other) noexcept
+    {
+        if (Data) cgltf_free(Data);
+        Data = Other.Data;
+        Other.Data = nullptr;
+        return *this;
+    }
+};
+
 // glTF->UE axis conversion helpers
 static FORCEINLINE FVector3f GltfToUE_Vector(const FVector3f& V)
 {
@@ -769,12 +795,10 @@ FString UVRMTranslator::MakeNodeUid(const TCHAR* Suffix) const
     return FString::Printf(TEXT("VRM_%s_%s"), *Base, Suffix);
 }
 
-// ---- cgltf-based file load (fill this out) ----
-bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
+// Parse + load + validate helper (returns RAII wrapper; OutError receives human-friendly message)
+static FCgltfScoped ParseCgltfFile(const FString& Filename, FString& OutError)
 {
-    const FString Filename = GetSourceData()->GetFilename();
-
-    Out.GlobalScale = 100.0f;
+    OutError.Empty();
 
     FTCHARToUTF8 PathUtf8(*Filename);
     cgltf_options Options = {};
@@ -783,22 +807,173 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
     cgltf_result Res = cgltf_parse_file(&Options, PathUtf8.Get(), &Data);
     if (Res != cgltf_result_success || !Data)
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] cgltf_parse_file failed: %s"), *Filename);
-        return false;
+        OutError = FString::Printf(TEXT("cgltf_parse_file failed: %s"), *Filename);
+        return FCgltfScoped(nullptr);
     }
+
+    // Wrap immediately so any early returns free Data
+    FCgltfScoped ScopedData(Data);
+
     Res = cgltf_load_buffers(&Options, Data, PathUtf8.Get());
     if (Res != cgltf_result_success)
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] cgltf_load_buffers failed: %s"), *Filename);
-        cgltf_free(Data);
+        OutError = FString::Printf(TEXT("cgltf_load_buffers failed: %s"), *Filename);
+        return FCgltfScoped(nullptr);
+    }
+
+    // Validate (non-fatal for many glTFs, but keep call to detect issues early)
+    cgltf_validate(Data);
+
+    return ScopedData;
+}
+
+static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out)
+{
+    if (!Data) return false;
+
+    int32 VertexBase = 0;
+    for (size_t mi = 0; mi < Data->meshes_count; ++mi)
+    {
+        const cgltf_mesh* Mesh = &Data->meshes[mi];
+        for (size_t pi = 0; pi < Mesh->primitives_count; ++pi)
+        {
+            const cgltf_primitive* Prim = &Mesh->primitives[pi];
+
+            // POSITION
+            TArray<FVector3f> PosLocal; PosLocal.Reset();
+            if (const cgltf_attribute* A = FindAttribute(Prim, cgltf_attribute_type_position))
+            {
+                if (!A->data) { continue; }
+                ReadAccessorVec3f(*A->data, PosLocal);
+            }
+            else { continue; }
+
+            // NORMAL
+            TArray<FVector3f> NrmLocal; NrmLocal.Reset();
+            if (const cgltf_attribute* A = FindAttribute(Prim, cgltf_attribute_type_normal))
+            {
+                if (A->data) { ReadAccessorVec3f(*A->data, NrmLocal); }
+            }
+
+            // TEXCOORD_0
+            TArray<FVector2f> UVLocal; UVLocal.Reset();
+            if (const cgltf_attribute* A = FindTexcoord(Prim, 0))
+            {
+                if (A->data) { ReadAccessorVec2f(*A->data, UVLocal); }
+            }
+            if (UVLocal.Num() == 0)
+            {
+                UVLocal.SetNumZeroed(PosLocal.Num());
+            }
+
+            const int32 VertCount = PosLocal.Num();
+
+            // Indices for this primitive
+            TArray<uint32> IndLocal; IndLocal.Reset();
+            if (Prim->indices) { ReadIndicesUInt32(*Prim->indices, IndLocal); }
+            else
+            {
+                IndLocal.SetNum(VertCount);
+                for (int32 i = 0; i < VertCount; ++i) { IndLocal[i] = i; }
+            }
+
+            // Append converted vertices
+            Out.Mesh.Positions.Reserve(Out.Mesh.Positions.Num() + VertCount);
+            Out.Mesh.Normals.Reserve(Out.Mesh.Normals.Num() + VertCount);
+            Out.Mesh.UV0.Reserve(Out.Mesh.UV0.Num() + VertCount);
+            Out.Mesh.SkinWeights.Reserve(Out.Mesh.SkinWeights.Num() + VertCount);
+
+            for (int32 v = 0; v < VertCount; ++v)
+            {
+                FVector3f Pue = RefFix_Vector(GltfToUE_Vector(PosLocal[v])) * Out.GlobalScale;
+                Out.Mesh.Positions.Add(Pue);
+
+                if (NrmLocal.IsValidIndex(v))
+                {
+                    FVector3f Nue = RefFix_Vector(GltfToUE_Vector(NrmLocal[v]));
+                    Out.Mesh.Normals.Add(Nue);
+                }
+                else
+                {
+                    Out.Mesh.Normals.Add(FVector3f(0, 0, 1));
+                }
+
+                Out.Mesh.UV0.Add(UVLocal[v]);
+            }
+
+            // JOINTS/WEIGHTS if available for this primitive
+            TArray<FVRMParsedMesh::FWeight> WeightsLocal; WeightsLocal.SetNumZeroed(VertCount);
+            bool bHaveJw = false;
+            if (Skin)
+            {
+                const cgltf_attribute* AJ = FindJoints(Prim, 0);
+                const cgltf_attribute* AW = FindWeights(Prim, 0);
+                if (AJ && AW && AJ->data && AW->data)
+                {
+                    // Temporary array then append
+                    TArray<FVRMParsedMesh::FWeight> Tmp; Tmp.SetNumZeroed(VertCount);
+                    ReadJointsWeights(*AJ->data, *AW->data, NodeToBone, Tmp);
+                    WeightsLocal = MoveTemp(Tmp);
+                    bHaveJw = true;
+                }
+            }
+            for (int32 v = 0; v < VertCount; ++v)
+            {
+                if (bHaveJw)
+                {
+                    Out.Mesh.SkinWeights.Add(WeightsLocal[v]);
+                }
+                else
+                {
+                    FVRMParsedMesh::FWeight W; W.BoneIndex[0] = 0; W.Weight[0] = 1.f; Out.Mesh.SkinWeights.Add(W);
+                }
+            }
+
+            // Append indices with offset and record material index for each triangle
+            const int32 IndexBase = VertexBase;
+            Out.Mesh.Indices.Reserve(Out.Mesh.Indices.Num() + IndLocal.Num());
+            int32 MaterialIndex = INDEX_NONE;
+            if (Prim->material)
+            {
+                MaterialIndex = int32(Prim->material - Data->materials);
+            }
+            for (int32 i = 0; i < IndLocal.Num(); ++i)
+            {
+                Out.Mesh.Indices.Add(IndexBase + int32(IndLocal[i]));
+            }
+            const int32 LocalTriCount = IndLocal.Num() / 3;
+            for (int32 t = 0; t < LocalTriCount; ++t)
+            {
+                Out.Mesh.TriMaterialIndex.Add(FMath::Max(0, MaterialIndex));
+            }
+
+            VertexBase += VertCount;
+        }
+    }
+
+    return true;
+}
+
+// ---- cgltf-based file load (fill this out) ----
+bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
+{
+    const FString Filename = GetSourceData()->GetFilename();
+
+    Out.GlobalScale = 100.0f;
+
+    // Use helper to parse/load/validate the file and obtain RAII-managed cgltf_data
+    FString ParseError;
+    FCgltfScoped ScopedData = ParseCgltfFile(Filename, ParseError);
+    if (!ScopedData.Data)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] %s"), *ParseError);
         return false;
     }
-    cgltf_validate(Data);
+    cgltf_data* Data = ScopedData.Data;
 
     if (Data->meshes_count == 0 || Data->nodes_count == 0)
     {
         UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] No meshes or nodes in file."));
-        cgltf_free(Data);
         return false;
     }
 
@@ -894,125 +1069,11 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         Out.Bones.Reset();
     }
 
-    // Merge all primitives from all meshes
-    int32 VertexBase = 0;
-    for (size_t mi = 0; mi < Data->meshes_count; ++mi)
+    // Merge all primitives from all meshes (extracted)
+    if (!MergePrimitivesFromMeshes(Data, Skin, NodeToBone, Out))
     {
-        const cgltf_mesh* Mesh = &Data->meshes[mi];
-        for (size_t pi = 0; pi < Mesh->primitives_count; ++pi)
-        {
-            const cgltf_primitive* Prim = &Mesh->primitives[pi];
-
-            // POSITION
-            TArray<FVector3f> PosLocal; PosLocal.Reset();
-            if (const cgltf_attribute* A = FindAttribute(Prim, cgltf_attribute_type_position))
-            {
-                if (!A->data) { continue; }
-                ReadAccessorVec3f(*A->data, PosLocal);
-            }
-            else { continue; }
-
-            // NORMAL
-            TArray<FVector3f> NrmLocal; NrmLocal.Reset();
-            if (const cgltf_attribute* A = FindAttribute(Prim, cgltf_attribute_type_normal))
-            {
-                if (A->data) { ReadAccessorVec3f(*A->data, NrmLocal); }
-            }
-
-            // TEXCOORD_0
-            TArray<FVector2f> UVLocal; UVLocal.Reset();
-            if (const cgltf_attribute* A = FindTexcoord(Prim, 0))
-            {
-                if (A->data) { ReadAccessorVec2f(*A->data, UVLocal); }
-            }
-            if (UVLocal.Num() == 0)
-            {
-                UVLocal.SetNumZeroed(PosLocal.Num());
-            }
-
-            const int32 VertCount = PosLocal.Num();
-
-            // Indices for this primitive
-            TArray<uint32> IndLocal; IndLocal.Reset();
-            if (Prim->indices) { ReadIndicesUInt32(*Prim->indices, IndLocal); }
-            else
-            {
-                IndLocal.SetNum(VertCount);
-                for (int32 i = 0; i < VertCount; ++i) { IndLocal[i] = i; }
-            }
-
-            // Append converted vertices
-            Out.Mesh.Positions.Reserve(Out.Mesh.Positions.Num() + VertCount);
-            Out.Mesh.Normals.Reserve(Out.Mesh.Normals.Num() + VertCount);
-            Out.Mesh.UV0.Reserve(Out.Mesh.UV0.Num() + VertCount);
-            Out.Mesh.SkinWeights.Reserve(Out.Mesh.SkinWeights.Num() + VertCount);
-
-            for (int32 v = 0; v < VertCount; ++v)
-            {
-                FVector3f Pue = RefFix_Vector(GltfToUE_Vector(PosLocal[v])) * Out.GlobalScale;
-                Out.Mesh.Positions.Add(Pue);
-
-                if (NrmLocal.IsValidIndex(v))
-                {
-                    FVector3f Nue = RefFix_Vector(GltfToUE_Vector(NrmLocal[v]));
-                    Out.Mesh.Normals.Add(Nue); 
-                }
-                else
-                {
-                    Out.Mesh.Normals.Add(FVector3f(0, 0, 1));
-                }
-
-                Out.Mesh.UV0.Add(UVLocal[v]);
-            }
-
-            // JOINTS/WEIGHTS if available for this primitive
-            TArray<FVRMParsedMesh::FWeight> WeightsLocal; WeightsLocal.SetNumZeroed(VertCount);
-            bool bHaveJw = false;
-            if (Skin)
-            {
-                const cgltf_attribute* AJ = FindJoints(Prim, 0);
-                const cgltf_attribute* AW = FindWeights(Prim, 0);
-                if (AJ && AW && AJ->data && AW->data)
-                {
-                    // Temporary array then append
-                    TArray<FVRMParsedMesh::FWeight> Tmp; Tmp.SetNumZeroed(VertCount);
-                    ReadJointsWeights(*AJ->data, *AW->data, NodeToBone, Tmp);
-                    WeightsLocal = MoveTemp(Tmp);
-                    bHaveJw = true;
-                }
-            }
-            for (int32 v = 0; v < VertCount; ++v)
-            {
-                if (bHaveJw)
-                {
-                    Out.Mesh.SkinWeights.Add(WeightsLocal[v]);
-                }
-                else
-                {
-                    FVRMParsedMesh::FWeight W; W.BoneIndex[0] = 0; W.Weight[0] = 1.f; Out.Mesh.SkinWeights.Add(W);
-                }
-            }
-
-            // Append indices with offset and record material index for each triangle
-            const int32 IndexBase = VertexBase;
-            Out.Mesh.Indices.Reserve(Out.Mesh.Indices.Num() + IndLocal.Num());
-            int32 MaterialIndex = INDEX_NONE;
-            if (Prim->material)
-            {
-                MaterialIndex = int32(Prim->material - Data->materials);
-            }
-            for (int32 i = 0; i < IndLocal.Num(); ++i)
-            {
-                Out.Mesh.Indices.Add(IndexBase + int32(IndLocal[i]));
-            }
-            const int32 LocalTriCount = IndLocal.Num() / 3;
-            for (int32 t = 0; t < LocalTriCount; ++t)
-            {
-                Out.Mesh.TriMaterialIndex.Add(FMath::Max(0, MaterialIndex));
-            }
-
-            VertexBase += VertCount;
-        }
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] Failed to merge mesh primitives."));
+        return false;
     }
 
     // --- Parse morph targets and merge primitive targets by name (preferred) with an index-based fallback
@@ -1145,39 +1206,11 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
             }
         }
     }
-    // Images: load all images referenced by the glTF (not only the first material)
+
+    // Images: use extracted helper
     if (Data->images_count > 0)
     {
-        Out.Images.SetNum(int32(Data->images_count));
-        for (int32 ii = 0; ii < int32(Data->images_count); ++ii)
-        {
-            const cgltf_image* Img = &Data->images[ii];
-            FVRMParsedImage P;
-            P.Name = Img->name ? FString(UTF8_TO_TCHAR(Img->name)) : FString::Printf(TEXT("Image_%d"), ii);
-
-            if (Img->buffer_view)
-            {
-                const uint8* Ptr = (const uint8*)Img->buffer_view->buffer->data + Img->buffer_view->offset;
-                const size_t Size = Img->buffer_view->size;
-                P.PNGOrJPEGBytes.SetNumUninitialized(Size);
-                FMemory::Memcpy(P.PNGOrJPEGBytes.GetData(), Ptr, Size);
-            }
-            else if (Img->uri)
-            {
-                const FString Uri = UTF8_TO_TCHAR(Img->uri);
-                if (Uri.StartsWith(TEXT("data:")))
-                {
-                    DecodeDataUri(Uri, P.PNGOrJPEGBytes);
-                }
-                else
-                {
-                    const FString Dir = FPaths::GetPath(Filename);
-                    const FString ImgPath = FPaths::ConvertRelativePathToFull(Dir / Uri);
-                    FFileHelper::LoadFileToArray(P.PNGOrJPEGBytes, *ImgPath);
-                }
-            }
-            Out.Images[ii] = MoveTemp(P);
-        }
+        LoadImagesFromCgltf(Data, Filename, Out);
     }
 
     // Materials: record at least base-color texture indices if available (optional)
@@ -1228,7 +1261,6 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         Out.Materials.Add(M);
     }
 
-    cgltf_free(Data);
     return true;
 }
 
@@ -1373,6 +1405,47 @@ static bool DecodeDataUri(const FString& Uri, TArray64<uint8>& OutBytes)
     if (Temp.Num() > 0)
     {
         FMemory::Memcpy(OutBytes.GetData(), Temp.GetData(), Temp.Num());
+    }
+    return true;
+}
+
+// Extracted image loader
+static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename, FVRMParsedModel& Out)
+{
+    if (!Data) return false;
+
+    if (Data->images_count > 0)
+    {
+        Out.Images.SetNum(int32(Data->images_count));
+        for (int32 ii = 0; ii < int32(Data->images_count); ++ii)
+        {
+            const cgltf_image* Img = &Data->images[ii];
+            FVRMParsedImage P;
+            P.Name = Img->name ? FString(UTF8_TO_TCHAR(Img->name)) : FString::Printf(TEXT("Image_%d"), ii);
+
+            if (Img->buffer_view)
+            {
+                const uint8* Ptr = (const uint8*)Img->buffer_view->buffer->data + Img->buffer_view->offset;
+                const size_t Size = Img->buffer_view->size;
+                P.PNGOrJPEGBytes.SetNumUninitialized(Size);
+                FMemory::Memcpy(P.PNGOrJPEGBytes.GetData(), Ptr, Size);
+            }
+            else if (Img->uri)
+            {
+                const FString Uri = UTF8_TO_TCHAR(Img->uri);
+                if (Uri.StartsWith(TEXT("data:")))
+                {
+                    DecodeDataUri(Uri, P.PNGOrJPEGBytes);
+                }
+                else
+                {
+                    const FString Dir = FPaths::GetPath(Filename);
+                    const FString ImgPath = FPaths::ConvertRelativePathToFull(Dir / Uri);
+                    FFileHelper::LoadFileToArray(P.PNGOrJPEGBytes, *ImgPath);
+                }
+            }
+            Out.Images[ii] = MoveTemp(P);
+        }
     }
     return true;
 }
