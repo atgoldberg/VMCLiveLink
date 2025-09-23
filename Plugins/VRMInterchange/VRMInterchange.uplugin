@@ -8,6 +8,11 @@
   "Modules": [
     {
       "Name": "VRMInterchange",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "VRMInterchangeEditor",
       "Type": "Editor",
       "LoadingPhase": "Default",
 			"IncludeListPlatforms": [ "Win64" ]
