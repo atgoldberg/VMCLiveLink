@@ -46,6 +46,50 @@ static void ReadIndicesUInt32(const cgltf_accessor& A, TArray<uint32>& Out);
 static FTransform NodeTRS(const cgltf_node* N);
 static void Normalize4(float W[4]);
 
+// New validation helper (centralized checks)
+static bool ValidateCgltfData(const cgltf_data* Data, FString& OutError);
+
+// New forward for extracted image loader
+static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename, FVRMParsedModel& Out);
+
+// New forward for extracted primitive-merge phase
+static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out);
+
+// New forward for extracted morph-target merge phase
+static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out);
+
+// New forward for extracted material parsing
+static void ParseMaterialTextures(const cgltf_data* Data, FVRMParsedModel& Out);
+
+// New helper: reset parsed model to a known default state
+static void ResetParsedModel(FVRMParsedModel& Out);
+
+// New helper: build mapping NodeIndex -> BoneIndex from skin/joints
+static TMap<int32,int32> BuildNodeToBoneMap(const cgltf_skin* Skin, const cgltf_data* Data);
+
+// Forward declaration for bone population helper
+static void PopulateBonesFromSkin(const cgltf_skin* Skin, const cgltf_data* Data, FVRMParsedModel& Out);
+
+// Simple RAII wrapper to ensure cgltf_free is always called
+struct FCgltfScoped
+{
+    cgltf_data* Data = nullptr;
+    explicit FCgltfScoped(cgltf_data* In) : Data(In) {}
+    ~FCgltfScoped() { if (Data) cgltf_free(Data); }
+
+    FCgltfScoped(const FCgltfScoped&) = delete;
+    FCgltfScoped& operator=(const FCgltfScoped&) = delete;
+
+    FCgltfScoped(FCgltfScoped&& Other) noexcept : Data(Other.Data) { Other.Data = nullptr; }
+    FCgltfScoped& operator=(FCgltfScoped&& Other) noexcept
+    {
+        if (Data) cgltf_free(Data);
+        Data = Other.Data;
+        Other.Data = nullptr;
+        return *this;
+    }
+};
+
 // glTF->UE axis conversion helpers
 static FORCEINLINE FVector3f GltfToUE_Vector(const FVector3f& V)
 {
@@ -769,12 +813,10 @@ FString UVRMTranslator::MakeNodeUid(const TCHAR* Suffix) const
     return FString::Printf(TEXT("VRM_%s_%s"), *Base, Suffix);
 }
 
-// ---- cgltf-based file load (fill this out) ----
-bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
+// Parse + load + validate helper (returns RAII wrapper; OutError receives human-friendly message)
+static FCgltfScoped ParseCgltfFile(const FString& Filename, FString& OutError)
 {
-    const FString Filename = GetSourceData()->GetFilename();
-
-    Out.GlobalScale = 100.0f;
+    OutError.Empty();
 
     FTCHARToUTF8 PathUtf8(*Filename);
     cgltf_options Options = {};
@@ -783,118 +825,44 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
     cgltf_result Res = cgltf_parse_file(&Options, PathUtf8.Get(), &Data);
     if (Res != cgltf_result_success || !Data)
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] cgltf_parse_file failed: %s"), *Filename);
-        return false;
+        OutError = FString::Printf(TEXT("cgltf_parse_file failed: %s"), *Filename);
+        return FCgltfScoped(nullptr);
     }
+
+    // Wrap immediately so any early returns free Data
+    FCgltfScoped ScopedData(Data);
+
     Res = cgltf_load_buffers(&Options, Data, PathUtf8.Get());
     if (Res != cgltf_result_success)
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] cgltf_load_buffers failed: %s"), *Filename);
-        cgltf_free(Data);
-        return false;
+        OutError = FString::Printf(TEXT("cgltf_load_buffers failed: %s"), *Filename);
+        return FCgltfScoped(nullptr);
     }
+
+    // Validate (non-fatal for many glTFs, but keep call to detect issues early)
     cgltf_validate(Data);
 
-    if (Data->meshes_count == 0 || Data->nodes_count == 0)
+    return ScopedData;
+}
+
+// Implementation: Build NodeIndex -> BoneIndex map (isolates mapping logic)
+static TMap<int32, int32> BuildNodeToBoneMap(const cgltf_skin* Skin, const cgltf_data* Data)
+{
+    TMap<int32, int32> Map;
+    if (!Skin || !Data) return Map;
+    for (size_t ji = 0; ji < Skin->joints_count; ++ji)
     {
-        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] No meshes or nodes in file."));
-        cgltf_free(Data);
-        return false;
+        // compute node index relative to Data->nodes array (same approach as original code)
+        const int32 NodeIndex = int32(Skin->joints[ji] - Data->nodes);
+        Map.Add(NodeIndex, int32(ji));
     }
+    return Map;
+}
 
-    // Assume single skin is used by all mesh nodes in VRM
-    const cgltf_skin* Skin = (Data->skins_count > 0) ? &Data->skins[0] : nullptr;
+static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* Skin, const TMap<int32, int32>& NodeToBone, FVRMParsedModel& Out)
+{
+    if (!Data) return false;
 
-    // Reset outputs
-    Out.Materials.Reset();
-    Out.Images.Reset();
-    Out.Mesh.Positions.Reset();
-    Out.Mesh.Normals.Reset();
-    Out.Mesh.UV0.Reset();
-    Out.Mesh.Indices.Reset();
-    Out.Mesh.SkinWeights.Reset();
-    Out.Mesh.TriMaterialIndex.Reset();
-
-    // Pre-build NodeIndex->BoneIndex mapping if skin exists
-    TMap<int32, int32> NodeToBone;
-    if (Skin)
-    {
-        for (size_t ji = 0; ji < Skin->joints_count; ++ji)
-        {
-            const int32 NodeIndex = int32(Skin->joints[ji] - Data->nodes);
-            NodeToBone.Add(NodeIndex, int32(ji));
-        }
-
-        // Build bones array from skin joints
-        Out.Bones.Reset();
-        Out.Bones.SetNum(int32(Skin->joints_count));
-        for (int32 ji = 0; ji < int32(Skin->joints_count); ++ji)
-        {
-            const cgltf_node* J = Skin->joints[ji];
-            FVRMParsedBone& B = Out.Bones[ji];
-            B.Name = J && J->name ? FString(UTF8_TO_TCHAR(J->name)) : FString::Printf(TEXT("Joint_%d"), ji);
-
-            // Find parent joint within the skin's joint list
-            B.Parent = INDEX_NONE;
-            const cgltf_node* P = J ? J->parent : nullptr;
-            while (P)
-            {
-                bool bFound = false;
-                for (int32 k = 0; k < int32(Skin->joints_count); ++k)
-                {
-                    if (Skin->joints[k] == P)
-                    {
-                        B.Parent = k;
-                        bFound = true;
-                        break;
-                    }
-                }
-                if (bFound) { break; }
-                P = P->parent;
-            }
-
-            // Convert local bind from glTF to UE axes
-            FTransform Local = NodeTRS(J);
-            FVector T = GltfToUE_Vector(Local.GetTranslation()) * Out.GlobalScale;
-            FQuat R = GltfToUE_Quat(Local.GetRotation());
-            FVector S = GltfToUE_Vector(Local.GetScale3D());
-            B.LocalBind = FTransform(R, T, S);
-        }
-
-        // Rebuild bone local binds so that:
-        //  - All local rotations are identity
-        //  - Global joint positions are corrected to face +Y and be unmirrored L/R
-        {
-            const int32 NumBones = Out.Bones.Num();
-            TArray<FTransform> GlobalXf; GlobalXf.SetNum(NumBones);
-            TArray<FVector>    FixedGlobalPos; FixedGlobalPos.SetNum(NumBones);
-
-            // Compute original global transforms from current local binds
-            for (int32 i = 0; i < NumBones; ++i)
-            {
-                const int32 Parent = Out.Bones[i].Parent;
-                const FTransform ParentGlobal = (Parent == INDEX_NONE) ? FTransform::Identity : GlobalXf[Parent];
-                GlobalXf[i] = Out.Bones[i].LocalBind * ParentGlobal;
-                // Apply reference fix to the global position
-                FixedGlobalPos[i] = RefFix_Vector(GlobalXf[i].GetTranslation());
-            }
-
-            // Recreate local binds as pure translations (identity rotation), preserving corrected positions
-            for (int32 i = 0; i < NumBones; ++i)
-            {
-                const int32 Parent = Out.Bones[i].Parent;
-                const FVector ParentPos = (Parent == INDEX_NONE) ? FVector::ZeroVector : FixedGlobalPos[Parent];
-                const FVector LocalT = FixedGlobalPos[i] - ParentPos;
-                Out.Bones[i].LocalBind = FTransform(FQuat::Identity, LocalT, FVector(1,1,1));
-            }
-        }
-    }
-    else
-    {
-        Out.Bones.Reset();
-    }
-
-    // Merge all primitives from all meshes
     int32 VertexBase = 0;
     for (size_t mi = 0; mi < Data->meshes_count; ++mi)
     {
@@ -955,7 +923,7 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
                 if (NrmLocal.IsValidIndex(v))
                 {
                     FVector3f Nue = RefFix_Vector(GltfToUE_Vector(NrmLocal[v]));
-                    Out.Mesh.Normals.Add(Nue); 
+                    Out.Mesh.Normals.Add(Nue);
                 }
                 else
                 {
@@ -1015,220 +983,117 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         }
     }
 
-    // --- Parse morph targets and merge primitive targets by name (preferred) with an index-based fallback
+    return true;
+}
+
+// ---- cgltf-based file load (fill this out) ----
+bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
+{
+    const FString Filename = GetSourceData()->GetFilename();
+
+    // Use centralized reset to set defaults and clear arrays
+    ResetParsedModel(Out);
+
+    // Use helper to parse/load/validate the file and obtain RAII-managed cgltf_data
+    FString ParseError;
+    FCgltfScoped ScopedData = ParseCgltfFile(Filename, ParseError);
+    if (!ScopedData.Data)
     {
-        const int32 TotalVertices = Out.Mesh.Positions.Num();
-        if (TotalVertices > 0)
-        {
-            // Map target name -> global morph index
-            TMap<FString, int32> NameToIndex;
-            // Keep ordered list of names to create Out.Mesh.Morphs in deterministic order
-            TArray<FString> OrderedNames;
-
-            // First pass: discover all target names (if available) and build mapping.
-            for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
-            {
-                const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
-                // Some cgltf versions expose mesh->target_names/target_names_count; guard use if present.
-                const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
-
-                for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
-                {
-                    const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
-                    for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
-                    {
-                        FString TargetName;
-                        if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
-                        {
-                            TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
-                        }
-                        // If no name available, use deterministic index-based fallback so unnamed targets still group by index
-                        if (TargetName.IsEmpty())
-                        {
-                            TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
-                        }
-
-                        if (!NameToIndex.Contains(TargetName))
-                        {
-                            const int32 NewIdx = OrderedNames.Num();
-                            OrderedNames.Add(TargetName);
-                            NameToIndex.Add(TargetName, NewIdx);
-                        }
-                    }
-                }
-            }
-
-            // If no targets discovered, nothing to do.
-            if (OrderedNames.Num() > 0)
-            {
-                // Allocate global morphs and zero the delta arrays
-                Out.Mesh.Morphs.SetNum(OrderedNames.Num());
-                for (int32 mi = 0; mi < OrderedNames.Num(); ++mi)
-                {
-                    Out.Mesh.Morphs[mi].Name = OrderedNames[mi];
-                    Out.Mesh.Morphs[mi].DeltaPositions.SetNumZeroed(TotalVertices);
-                }
-
-                // Second pass: read per-primitive deltas and merge into the global morph identified by name (or fallback index-name)
-                int32 VertexBase2 = 0;
-                for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
-                {
-                    const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
-                    const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
-
-                    for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
-                    {
-                        const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
-
-                        // POSITION accessor to determine this primitive's vertex count
-                        int32 PrimVertCount = 0;
-                        if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
-                        {
-                            if (Apos->data)
-                            {
-                                PrimVertCount = (int32)Apos->data->count;
-                            }
-                        }
-
-                        for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
-                        {
-                            // Determine global morph name/key for this primitive target
-                            FString TargetName;
-                            if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
-                            {
-                                TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
-                            }
-                            if (TargetName.IsEmpty())
-                            {
-                                TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
-                            }
-
-                            const int32* FoundGlobal = NameToIndex.Find(TargetName);
-                            if (!FoundGlobal)
-                            {
-                                // Shouldn't happen, but guard
-                                continue;
-                            }
-                            const int32 GlobalMorphIndex = *FoundGlobal;
-
-                            const cgltf_morph_target& Tgt = Prim2->targets[ti];
-                            const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
-                            if (!PosAcc || !PosAcc->count)
-                            {
-                                continue;
-                            }
-
-                            TArray<FVector3f> DeltaLocal;
-                            ReadAccessorVec3f(*PosAcc, DeltaLocal);
-
-                            if (DeltaLocal.Num() != PrimVertCount)
-                            {
-                                UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
-                                continue;
-                            }
-
-                            for (int32 v = 0; v < PrimVertCount; ++v)
-                            {
-                                const FVector3f Src = DeltaLocal[v];
-                                const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
-                                const int32 GlobalIndex = VertexBase2 + v;
-                                if (Out.Mesh.Morphs.IsValidIndex(GlobalMorphIndex) && Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions.IsValidIndex(GlobalIndex))
-                                {
-                                    Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions[GlobalIndex] = Conv;
-                                }
-                            }
-                        }
-
-                        VertexBase2 += PrimVertCount;
-                    }
-                }
-            }
-        }
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] %s"), *ParseError);
+        return false;
     }
-    // Images: load all images referenced by the glTF (not only the first material)
+    cgltf_data* Data = ScopedData.Data;
+
+    // Centralized validation checks
+    if (!ValidateCgltfData(Data, ParseError))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] %s"), *ParseError);
+        return false;
+    }
+
+    // Assume single skin is used by all mesh nodes in VRM
+    const cgltf_skin* Skin = (Data->skins_count > 0) ? &Data->skins[0] : nullptr;
+
+    // Pre-build NodeIndex->BoneIndex mapping if skin exists (now using extracted helper)
+    TMap<int32, int32> NodeToBone = BuildNodeToBoneMap(Skin, Data);
+
+    // Populate bones via helper (names, parents, UE-space local binds, reference pose fix)
+    PopulateBonesFromSkin(Skin, Data, Out);
+    if (Skin && Out.Bones.Num() == 0)
+    {
+        // Preserve previous failure behavior when a skin exists but no joints were produced
+        return false;
+    }
+
+    // Merge all primitives from all meshes (extracted)
+    if (!MergePrimitivesFromMeshes(Data, Skin, NodeToBone, Out))
+    {
+        UE_LOG(LogTemp, Error, TEXT("[VRMInterchange] Failed to merge mesh primitives."));
+        return false;
+    }
+
+    // Parse morph targets (extracted helper) — must run after primitives merged
+    ParseMorphTargets(Data, Out);
+
+    // Images: use extracted helper
     if (Data->images_count > 0)
     {
-        Out.Images.SetNum(int32(Data->images_count));
-        for (int32 ii = 0; ii < int32(Data->images_count); ++ii)
-        {
-            const cgltf_image* Img = &Data->images[ii];
-            FVRMParsedImage P;
-            P.Name = Img->name ? FString(UTF8_TO_TCHAR(Img->name)) : FString::Printf(TEXT("Image_%d"), ii);
-
-            if (Img->buffer_view)
-            {
-                const uint8* Ptr = (const uint8*)Img->buffer_view->buffer->data + Img->buffer_view->offset;
-                const size_t Size = Img->buffer_view->size;
-                P.PNGOrJPEGBytes.SetNumUninitialized(Size);
-                FMemory::Memcpy(P.PNGOrJPEGBytes.GetData(), Ptr, Size);
-            }
-            else if (Img->uri)
-            {
-                const FString Uri = UTF8_TO_TCHAR(Img->uri);
-                if (Uri.StartsWith(TEXT("data:")))
-                {
-                    DecodeDataUri(Uri, P.PNGOrJPEGBytes);
-                }
-                else
-                {
-                    const FString Dir = FPaths::GetPath(Filename);
-                    const FString ImgPath = FPaths::ConvertRelativePathToFull(Dir / Uri);
-                    FFileHelper::LoadFileToArray(P.PNGOrJPEGBytes, *ImgPath);
-                }
-            }
-            Out.Images[ii] = MoveTemp(P);
-        }
+        LoadImagesFromCgltf(Data, Filename, Out);
     }
 
     // Materials: record at least base-color texture indices if available (optional)
-    Out.Materials.Reset();
-    for (int32 mi = 0; mi < int32(Data->materials_count); ++mi)
+    ParseMaterialTextures(Data, Out);
+    return true;
+}
+
+// New validation helper (centralized checks)
+static bool ValidateCgltfData(const cgltf_data* Data, FString& OutError)
+{
+    OutError.Empty();
+    if (!Data)
     {
-        const cgltf_material* Mat = &Data->materials[mi];
-        FVRMParsedModel::FMat M;
-        M.Name = Mat->name ? FString(UTF8_TO_TCHAR(Mat->name)) : FString::Printf(TEXT("VRM_Mat_%d"), mi);
-        M.BaseColorTexture = INDEX_NONE;
-        M.NormalTexture = INDEX_NONE;
-        M.MetallicRoughnessTexture = INDEX_NONE;
-        M.OcclusionTexture = INDEX_NONE;
-        M.EmissiveTexture = INDEX_NONE;
-        if (Mat->has_pbr_metallic_roughness)
-        {
-            if (Mat->pbr_metallic_roughness.base_color_texture.texture && Mat->pbr_metallic_roughness.base_color_texture.texture->image)
-            {
-                M.BaseColorTexture = int32(Mat->pbr_metallic_roughness.base_color_texture.texture->image - Data->images);
-            }
-            if (Mat->pbr_metallic_roughness.metallic_roughness_texture.texture && Mat->pbr_metallic_roughness.metallic_roughness_texture.texture->image)
-            {
-                M.MetallicRoughnessTexture = int32(Mat->pbr_metallic_roughness.metallic_roughness_texture.texture->image - Data->images);
-            }
-        }
-        if (Mat->normal_texture.texture && Mat->normal_texture.texture->image)
-        {
-            M.NormalTexture = int32(Mat->normal_texture.texture->image - Data->images);
-        }
-        if (Mat->occlusion_texture.texture && Mat->occlusion_texture.texture->image)
-        {
-            M.OcclusionTexture = int32(Mat->occlusion_texture.texture->image - Data->images);
-        }
-        if (Mat->emissive_texture.texture && Mat->emissive_texture.texture->image)
-        {
-            M.EmissiveTexture = int32(Mat->emissive_texture.texture->image - Data->images);
-        }
-        M.bDoubleSided = Mat->double_sided != 0;
-        if (Mat->alpha_mode == cgltf_alpha_mode_mask)
-        {
-            M.AlphaMode = 1;
-            M.AlphaCutoff = (float)Mat->alpha_cutoff;
-        }
-        else if (Mat->alpha_mode == cgltf_alpha_mode_blend)
-        {
-            M.AlphaMode = 2;
-        }
-        Out.Materials.Add(M);
+        OutError = TEXT("No glTF data (null).");
+        return false;
     }
 
-    cgltf_free(Data);
+    if (Data->meshes_count == 0 || Data->nodes_count == 0)
+    {
+        OutError = TEXT("No meshes or nodes in file.");
+        return false;
+    }
+
+    // Ensure every mesh has at least one primitive and each primitive has a POSITION attribute.
+    for (size_t mi = 0; mi < Data->meshes_count; ++mi)
+    {
+        const cgltf_mesh* Mesh = &Data->meshes[mi];
+        if (Mesh->primitives_count == 0)
+        {
+            OutError = FString::Printf(TEXT("Mesh %d contains no primitives."), int(mi));
+            return false;
+        }
+
+        for (size_t pi = 0; pi < Mesh->primitives_count; ++pi)
+        {
+            const cgltf_primitive* Prim = &Mesh->primitives[pi];
+
+            bool bHasPosition = false;
+            for (size_t ai = 0; ai < Prim->attributes_count; ++ai)
+            {
+                if (Prim->attributes[ai].type == cgltf_attribute_type_position)
+                {
+                    bHasPosition = true;
+                    break;
+                }
+            }
+
+            if (!bHasPosition)
+            {
+                OutError = FString::Printf(TEXT("Primitive %d.%d missing POSITION attribute."), int(mi), int(pi));
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -1375,4 +1240,355 @@ static bool DecodeDataUri(const FString& Uri, TArray64<uint8>& OutBytes)
         FMemory::Memcpy(OutBytes.GetData(), Temp.GetData(), Temp.Num());
     }
     return true;
+}
+
+// Extracted image loader
+static bool LoadImagesFromCgltf(const cgltf_data* Data, const FString& Filename, FVRMParsedModel& Out)
+{
+    if (!Data) return false;
+
+    if (Data->images_count > 0)
+    {
+        Out.Images.SetNum(int32(Data->images_count));
+        for (int32 ii = 0; ii < int32(Data->images_count); ++ii)
+        {
+            const cgltf_image* Img = &Data->images[ii];
+            FVRMParsedImage P;
+            P.Name = Img->name ? FString(UTF8_TO_TCHAR(Img->name)) : FString::Printf(TEXT("Image_%d"), ii);
+
+            if (Img->buffer_view)
+            {
+                const uint8* Ptr = (const uint8*)Img->buffer_view->buffer->data + Img->buffer_view->offset;
+                const size_t Size = Img->buffer_view->size;
+                P.PNGOrJPEGBytes.SetNumUninitialized(Size);
+                FMemory::Memcpy(P.PNGOrJPEGBytes.GetData(), Ptr, Size);
+            }
+            else if (Img->uri)
+            {
+                const FString Uri = UTF8_TO_TCHAR(Img->uri);
+                if (Uri.StartsWith(TEXT("data:")))
+                {
+                    DecodeDataUri(Uri, P.PNGOrJPEGBytes);
+                }
+                else
+                {
+                    const FString Dir = FPaths::GetPath(Filename);
+                    const FString ImgPath = FPaths::ConvertRelativePathToFull(Dir / Uri);
+                    FFileHelper::LoadFileToArray(P.PNGOrJPEGBytes, *ImgPath);
+                }
+            }
+            Out.Images[ii] = MoveTemp(P);
+        }
+    }
+    return true;
+}
+
+// Extracted helper: parse material textures and flags into Out.Materials
+static void ParseMaterialTextures(const cgltf_data* Data, FVRMParsedModel& Out)
+{
+    Out.Materials.Reset();
+    if (!Data || Data->materials_count == 0)
+    {
+        return;
+    }
+
+    for (int32 mi = 0; mi < int32(Data->materials_count); ++mi)
+    {
+        const cgltf_material* Mat = &Data->materials[mi];
+
+        FVRMParsedModel::FMat M;
+        M.Name = Mat->name ? FString(UTF8_TO_TCHAR(Mat->name)) : FString::Printf(TEXT("VRM_Mat_%d"), mi);
+
+        // Defaults
+        M.BaseColorTexture = INDEX_NONE;
+        M.NormalTexture = INDEX_NONE;
+        M.MetallicRoughnessTexture = INDEX_NONE;
+        M.OcclusionTexture = INDEX_NONE;
+        M.EmissiveTexture = INDEX_NONE;
+        M.bDoubleSided = false;
+        M.AlphaMode = 0;
+        M.AlphaCutoff = 0.5f;
+
+        // PBR textures
+        if (Mat->has_pbr_metallic_roughness)
+        {
+            if (Mat->pbr_metallic_roughness.base_color_texture.texture &&
+                Mat->pbr_metallic_roughness.base_color_texture.texture->image)
+            {
+                M.BaseColorTexture = int32(Mat->pbr_metallic_roughness.base_color_texture.texture->image - Data->images);
+            }
+            if (Mat->pbr_metallic_roughness.metallic_roughness_texture.texture &&
+                Mat->pbr_metallic_roughness.metallic_roughness_texture.texture->image)
+            {
+                M.MetallicRoughnessTexture = int32(Mat->pbr_metallic_roughness.metallic_roughness_texture.texture->image - Data->images);
+            }
+        }
+
+        // Normal
+        if (Mat->normal_texture.texture && Mat->normal_texture.texture->image)
+        {
+            M.NormalTexture = int32(Mat->normal_texture.texture->image - Data->images);
+        }
+
+        // Occlusion
+        if (Mat->occlusion_texture.texture && Mat->occlusion_texture.texture->image)
+        {
+            M.OcclusionTexture = int32(Mat->occlusion_texture.texture->image - Data->images);
+        }
+
+        // Emissive
+        if (Mat->emissive_texture.texture && Mat->emissive_texture.texture->image)
+        {
+            M.EmissiveTexture = int32(Mat->emissive_texture.texture->image - Data->images);
+        }
+
+        // Double-sided
+        M.bDoubleSided = Mat->double_sided != 0;
+
+        // Alpha mode and cutoff
+        if (Mat->alpha_mode == cgltf_alpha_mode_mask)
+        {
+            M.AlphaMode = 1;
+            M.AlphaCutoff = (float)Mat->alpha_cutoff;
+        }
+        else if (Mat->alpha_mode == cgltf_alpha_mode_blend)
+        {
+            M.AlphaMode = 2;
+        }
+
+        Out.Materials.Add(M);
+    }
+}
+
+static void ParseMorphTargets(const cgltf_data* Data, FVRMParsedModel& Out)
+{
+    if (!Data) return;
+
+    const int32 TotalVertices = Out.Mesh.Positions.Num();
+    if (TotalVertices <= 0) return;
+
+    // Map target name -> global morph index
+    TMap<FString, int32> NameToIndex;
+    // Keep ordered list of names to create Out.Mesh.Morphs in deterministic order
+    TArray<FString> OrderedNames;
+
+    // First pass: discover all target names (if available) and build mapping.
+    for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+    {
+        const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+        const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+        for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+        {
+            const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+            for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+            {
+                FString TargetName;
+                if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                {
+                    TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                }
+                // If no name available, use deterministic index-based fallback so unnamed targets still group by index
+                if (TargetName.IsEmpty())
+                {
+                    TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                }
+
+                if (!NameToIndex.Contains(TargetName))
+                {
+                    const int32 NewIdx = OrderedNames.Num();
+                    OrderedNames.Add(TargetName);
+                    NameToIndex.Add(TargetName, NewIdx);
+                }
+            }
+        }
+    }
+
+    // If no targets discovered, nothing to do.
+    if (OrderedNames.Num() == 0) return;
+
+    // Allocate global morphs and zero the delta arrays
+    Out.Mesh.Morphs.SetNum(OrderedNames.Num());
+    for (int32 mi = 0; mi < OrderedNames.Num(); ++mi)
+    {
+        Out.Mesh.Morphs[mi].Name = OrderedNames[mi];
+        Out.Mesh.Morphs[mi].DeltaPositions.SetNumZeroed(TotalVertices);
+    }
+
+    // Second pass: read per-primitive deltas and merge into the global morph identified by name (or fallback index-name)
+    int32 VertexBase2 = 0;
+    for (size_t mi2 = 0; mi2 < Data->meshes_count; ++mi2)
+    {
+        const cgltf_mesh* Mesh2 = &Data->meshes[mi2];
+        const bool bHaveMeshNames = (Mesh2 && Mesh2->target_names && Mesh2->target_names_count > 0);
+
+        for (size_t pi2 = 0; pi2 < Mesh2->primitives_count; ++pi2)
+        {
+            const cgltf_primitive* Prim2 = &Mesh2->primitives[pi2];
+
+            // POSITION accessor to determine this primitive's vertex count
+            int32 PrimVertCount = 0;
+            if (const cgltf_attribute* Apos = FindAttribute(Prim2, cgltf_attribute_type_position))
+            {
+                if (Apos->data)
+                {
+                    PrimVertCount = (int32)Apos->data->count;
+                }
+            }
+
+            for (size_t ti = 0; ti < Prim2->targets_count; ++ti)
+            {
+                // Determine global morph name/key for this primitive target
+                FString TargetName;
+                if (bHaveMeshNames && ti < Mesh2->target_names_count && Mesh2->target_names[ti])
+                {
+                    TargetName = FString(UTF8_TO_TCHAR(Mesh2->target_names[ti])).TrimStartAndEnd();
+                }
+                if (TargetName.IsEmpty())
+                {
+                    TargetName = FString::Printf(TEXT("morph_%d"), int32(ti));
+                }
+
+                const int32* FoundGlobal = NameToIndex.Find(TargetName);
+                if (!FoundGlobal)
+                {
+                    // Shouldn't happen, but guard
+                    continue;
+                }
+                const int32 GlobalMorphIndex = *FoundGlobal;
+
+                const cgltf_morph_target& Tgt = Prim2->targets[ti];
+                const cgltf_accessor* PosAcc = FindTargetAccessor(Tgt, cgltf_attribute_type_position);
+                if (!PosAcc || !PosAcc->count)
+                {
+                    continue;
+                }
+
+                TArray<FVector3f> DeltaLocal;
+                ReadAccessorVec3f(*PosAcc, DeltaLocal);
+
+                if (DeltaLocal.Num() != PrimVertCount)
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Morph target vertex count mismatch (primitive %d.%d): %d vs %d. Skipping."), (int)mi2, (int)pi2, DeltaLocal.Num(), PrimVertCount);
+                    continue;
+                }
+
+                for (int32 v = 0; v < PrimVertCount; ++v)
+                {
+                    const FVector3f Src = DeltaLocal[v];
+                    const FVector3f Conv = RefFix_Vector(GltfToUE_Vector(Src)) * Out.GlobalScale;
+                    const int32 GlobalIndex = VertexBase2 + v;
+                    if (Out.Mesh.Morphs.IsValidIndex(GlobalMorphIndex) && Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions.IsValidIndex(GlobalIndex))
+                    {
+                        Out.Mesh.Morphs[GlobalMorphIndex].DeltaPositions[GlobalIndex] = Conv;
+                    }
+                }
+            }
+
+            VertexBase2 += PrimVertCount;
+        }
+    }
+}
+
+// Implementation: reset parsed model to defaults and clear all arrays
+static void ResetParsedModel(FVRMParsedModel& Out)
+{
+    // Default global scale used throughout the translator
+    Out.GlobalScale = 100.0f;
+
+    Out.Materials.Reset();
+    Out.Images.Reset();
+
+    Out.Mesh.Positions.Reset();
+    Out.Mesh.Normals.Reset();
+    Out.Mesh.UV0.Reset();
+    Out.Mesh.Indices.Reset();
+    Out.Mesh.SkinWeights.Reset();
+    Out.Mesh.TriMaterialIndex.Reset();
+    Out.Mesh.Morphs.Reset();
+
+    Out.Bones.Reset();
+}
+
+// Populate bones array from a cgltf_skin: names, parent indices and local binds converted to UE space.
+// Also performs the "reference pose fix" that zeroes rotations and corrects global positions.
+static void PopulateBonesFromSkin(const cgltf_skin* Skin, const cgltf_data* Data, FVRMParsedModel& Out)
+{
+    if (!Skin || !Data)
+    {
+        Out.Bones.Reset();
+        return;
+    }
+
+    // Allocate bones array
+    Out.Bones.Reset();
+    Out.Bones.SetNum(int32(Skin->joints_count));
+
+    // First pass: set names, find parent indices within the skin joints list and convert local TRS -> UE space
+    for (int32 ji = 0; ji < int32(Skin->joints_count); ++ji)
+    {
+        const cgltf_node* J = Skin->joints[ji];
+        FVRMParsedBone& B = Out.Bones[ji];
+
+        // Name
+        B.Name = (J && J->name) ? FString(UTF8_TO_TCHAR(J->name)) : FString::Printf(TEXT("Joint_%d"), ji);
+
+        // Parent: find the parent node inside the skin->joints array, or INDEX_NONE
+        B.Parent = INDEX_NONE;
+        const cgltf_node* P = J ? J->parent : nullptr;
+        while (P)
+        {
+            bool bFound = false;
+            for (int32 k = 0; k < int32(Skin->joints_count); ++k)
+            {
+                if (Skin->joints[k] == P)
+                {
+                    B.Parent = k;
+                    bFound = true;
+                    break;
+                }
+            }
+            if (bFound) { break; }
+            P = P->parent;
+        }
+
+        // Convert local bind TRS from glTF to UE axes and apply global scale
+        FTransform Local = NodeTRS(J);
+        FVector T = GltfToUE_Vector(Local.GetTranslation()) * Out.GlobalScale;
+        FQuat R = GltfToUE_Quat(Local.GetRotation());
+        FVector S = GltfToUE_Vector(Local.GetScale3D());
+        B.LocalBind = FTransform(R, T, S);
+    }
+
+    // Second pass: rebuild local binds so that rotations are identity and positions are corrected
+    // This preserves corrected global positions while producing pure-translation local binds.
+    {
+        const int32 NumBones = Out.Bones.Num();
+        if (NumBones == 0) return;
+
+        TArray<FTransform> GlobalXf;
+        GlobalXf.SetNum(NumBones);
+        TArray<FVector> FixedGlobalPos;
+        FixedGlobalPos.SetNum(NumBones);
+
+        // Compute original global transforms from current local binds
+        for (int32 i = 0; i < NumBones; ++i)
+        {
+            const int32 Parent = Out.Bones[i].Parent;
+            const FTransform ParentGlobal = (Parent == INDEX_NONE) ? FTransform::Identity : GlobalXf[Parent];
+            GlobalXf[i] = Out.Bones[i].LocalBind * ParentGlobal;
+
+            // Apply reference fix to the global position (unmirror and rotate to +Y forward)
+            FixedGlobalPos[i] = RefFix_Vector(GlobalXf[i].GetTranslation());
+        }
+
+        // Recreate local binds as pure translations (identity rotation), preserving corrected positions
+        for (int32 i = 0; i < NumBones; ++i)
+        {
+            const int32 Parent = Out.Bones[i].Parent;
+            const FVector ParentPos = (Parent == INDEX_NONE) ? FVector::ZeroVector : FixedGlobalPos[Parent];
+            const FVector LocalT = FixedGlobalPos[i] - ParentPos;
+            Out.Bones[i].LocalBind = FTransform(FQuat::Identity, LocalT, FVector(1.0f, 1.0f, 1.0f));
+        }
+    }
 }
