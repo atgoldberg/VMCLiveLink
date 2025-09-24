@@ -7,7 +7,7 @@ UVRMInterchangeSettings::UVRMInterchangeSettings()
 	CategoryName = TEXT("Plugins");
 	SectionName = TEXT("VRM Interchange");
 	// Sensible defaults
-	bGenerateSpringBoneData = false;
+	bGenerateSpringBoneData = true;
 	bGeneratePostProcessAnimBP = false;
 	bAssignPostProcessABP = false;
 	bOverwriteExistingSpringAssets = false;

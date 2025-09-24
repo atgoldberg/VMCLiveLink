@@ -10,9 +10,26 @@
 #include "InterchangeProjectSettings.h"
 #include "VRMTranslator.h"
 
+// For asset lookup
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "Misc/PackageName.h"
+#include "UObject/Package.h"
+
 namespace
 {
 #if WITH_EDITOR
+static UObject* FindPluginDefaultSpringBonesPipelineAsset()
+{
+	// Look for the pipeline asset shipped in the plugin content
+	// Mount point for plugin content is "/VRMInterchange"
+	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultSpringBonesPipeline.DefaultSpringBonesPipeline");
+	if (UObject* Existing = StaticLoadObject(UVRMSpringBonesPostImportPipeline::StaticClass(), nullptr, PluginObjectPath))
+	{
+		return Existing;
+	}
+	return nullptr;
+}
+
 static void AppendVRMSpringBonesPipeline()
 {
 	// Get mutable project settings (Content Import Settings)
@@ -54,9 +71,7 @@ static void AppendVRMSpringBonesPipeline()
 		Per = &AssetsStack->PerTranslatorPipelines.Last();
 	}
 
-	// Append our pipeline (prefer asset so settings like bGenerateSpringBoneData are honored)
-	// Fallback to class path if the asset does not exist.
-	const FSoftObjectPath SpringAssetPath(TEXT("/VRMInterchange/DefaultPipelines/DefaultSpringBonesPipeline.DefaultSpringBonesPipeline"));
+	// Prefer the plugin asset; if not found, fall back to class path
 	const FSoftObjectPath SpringClassPath(TEXT("/Script/VRMInterchangeEditor.VRMSpringBonesPostImportPipeline"));
 
 	auto ContainsPath = [&](const FSoftObjectPath& P)
@@ -72,18 +87,24 @@ static void AppendVRMSpringBonesPipeline()
 	};
 
 	bool bDirty = false;
-	// Try to add the asset path first
-	if (!ContainsPath(SpringAssetPath))
-	{
-		Per->Pipelines.Add(SpringAssetPath);
-		bDirty = true;
-	}
 
-	// As a safety, if asset fails to load at runtime the engine will still show the path; optionally add class path as backup if not present
-	if (!ContainsPath(SpringClassPath))
+	if (UObject* PluginPipeline = FindPluginDefaultSpringBonesPipelineAsset())
 	{
-		// Keep only asset by default; comment next line if you do not want a backup class reference
-		// Per->Pipelines.Add(SpringClassPath);
+		const FSoftObjectPath SpringAssetPath(PluginPipeline);
+		if (!ContainsPath(SpringAssetPath))
+		{
+			Per->Pipelines.Add(SpringAssetPath);
+			bDirty = true;
+		}
+	}
+	else
+	{
+		// Safe fallback: add by class so import still works without the asset
+		if (!ContainsPath(SpringClassPath))
+		{
+			Per->Pipelines.Add(SpringClassPath);
+			bDirty = true;
+		}
 	}
 
 	if (bDirty)
@@ -120,7 +141,7 @@ public:
         }
         UE_LOG(LogTemp, Log, TEXT("Interchange Pipeline subclasses enumerated: %d"), Found);
 
-        // Append our pipeline to the project settings (safe, non-destructive)
+        // Append our pipeline to the project settings (safe, prefers plugin asset, falls back to class)
         AppendVRMSpringBonesPipeline();
 #endif
     }
