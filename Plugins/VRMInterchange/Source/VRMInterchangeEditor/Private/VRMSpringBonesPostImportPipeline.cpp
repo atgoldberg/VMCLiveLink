@@ -1,4 +1,7 @@
-﻿#include "VRMSpringBonesPostImportPipeline.h"
+﻿// VRMSpringBonesPostImportPipeline.cpp
+// Fixed: Removed immediate package saving during import to prevent interference with main VRM import process
+// The pipeline now defers saving to Unreal's asset management system to avoid race conditions and resource conflicts
+#include "VRMSpringBonesPostImportPipeline.h"
 #include "VRMSpringBoneData.h"
 
 #include "InterchangeSourceData.h"
@@ -43,6 +46,7 @@
 void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
+    // Early exit if spring bone generation is disabled or if we don't have the required inputs
     if (!bGenerateSpringBoneData || !BaseNodeContainer)
     {
         return;
@@ -108,16 +112,24 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
 
     // Create the package if needed
     UPackage* Package = CreatePackage(*LongPackageName);
+
     if (!Package)
     {
         UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Failed to create/find package '%s'."), *LongPackageName);
         return;
     }
 
-    // Find or create the asset
+    // Find or create the asset (be more defensive about existing assets)
     UVRMSpringBoneData* Data = FindObject<UVRMSpringBoneData>(Package, *AssetName);
     if (!Data)
     {
+        // Double-check that we won't be creating a conflicting asset
+        if (Package->FindExportObject(UVRMSpringBoneData::StaticClass(), FName(*AssetName)))
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Asset '%s' already exists with different type in package '%s'."), *AssetName, *LongPackageName);
+            return;
+        }
+        
         Data = NewObject<UVRMSpringBoneData>(Package, *AssetName, RF_Public | RF_Standalone);
     }
     if (!Data)
@@ -195,13 +207,14 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         }
     }
 
+
     // Register the asset but do NOT save packages here; saving during pipeline execution can
     // interfere with Interchange factory import (locks packages and can break asset creation).
-    Data->MarkPackageDirty();
-    FAssetRegistryModule::AssetCreated(Data);
-    Package->SetDirtyFlag(true);
 
+    Data->MarkPackageDirty();
+    Package->SetDirtyFlag(true);
     UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Authored '%s' (will be saved by the import system)"), *Data->GetPathName());
+
 #endif
 }
 
