@@ -17,6 +17,8 @@
       "Type": "Editor",
       "LoadingPhase": "PreDefault",
       "EnabledByDefault": true
+			"IncludeListPlatforms": [ "Win64" ]
+
     }
   ],
   "EnabledByDefault": true,

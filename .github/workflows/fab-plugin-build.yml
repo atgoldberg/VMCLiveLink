@@ -18,6 +18,7 @@ jobs:
         shell: powershell
     env:
       PLUGIN_DIR: "Plugins/VMCLiveLink"
+      VRM_PLUGIN_DIR: "Plugins/VRMInterchange"
       ENGINE_ROOTS: 'C:\\Program Files\\Epic Games\\UE_5.6'
       ENGINE_VERSIONS: '5.6.0'
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,9 +52,8 @@ jobs:
           $PluginDir = $env:PLUGIN_DIR
           python "scripts\add_copyright_headers.py" $PluginDir --holder "Lifelike & Believable Animation Design, Inc." --verify
 
-      - name: Build Fab packages
+      - name: Build Fab packages (VMCLiveLink and VRMInterchange)
         run: |
-          $PluginDir = $env:PLUGIN_DIR
           $OutputDir = "$(Resolve-Path .)\FabBuilds"
           New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
@@ -61,9 +61,21 @@ jobs:
           $EngineRoots = ($env:ENGINE_ROOTS -split ",").ForEach({ $_.Trim(' ""') })
           $EngineVers  = ($env:ENGINE_VERSIONS -split ",").ForEach({ $_.Trim(' ""') })
 
-          ./scripts/build_fab.ps1 -PluginDir $PluginDir -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
+          $PluginDirs = @()
+          if ($env:PLUGIN_DIR) { $PluginDirs += $env:PLUGIN_DIR }
+          if ($env:VRM_PLUGIN_DIR) { $PluginDirs += $env:VRM_PLUGIN_DIR }
 
-      - name: Prepare single VMCLiveLink.zip
+          foreach ($pd in $PluginDirs) {
+            Write-Host "Building Fab package for plugin at: $pd"
+            ./scripts/build_fab.ps1 -PluginDir $pd -OutputDir $OutputDir -EngineRoots $EngineRoots -EngineVersions $EngineVers
+          }
+
+      - name: Get current timestamp
+        id: date
+        run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
+        shell: powershell
+
+      - name: Prepare single VMCLiveLink.zip (includes VMCLiveLink and VRMInterchange)
         run: |
           $OutputDir = "$(Resolve-Path .)\FabBuilds"
           $ZipFiles = Get-ChildItem -Path $OutputDir -Filter '*_Fab.zip' -File -ErrorAction SilentlyContinue
@@ -73,47 +85,69 @@ jobs:
             exit 1
           }
 
-          $FinalZip = Join-Path $OutputDir 'VMCLiveLink.zip'
-
-          if ($ZipFiles.Count -eq 1) {
-            Copy-Item -Path $ZipFiles[0].FullName -Destination $FinalZip -Force
+          # Use the first ENGINE_VERSIONS entry to construct a short engine folder name like "UE5.6"
+          $EngineVers = ($env:ENGINE_VERSIONS -split ",").ForEach({ $_.Trim(' ""') })
+          $FirstVer = $EngineVers[0]
+          if ($FirstVer -match '^(\d+)\.(\d+)') {
+            $ShortEngine = "UE$($matches[1]).$($matches[2])"
           } else {
-            # Merge multiple Fab zips into a single zip by extracting and recompressing.
-            $TempDir = Join-Path $env:TEMP ('fabzip_' + [Guid]::NewGuid().ToString())
-            New-Item -ItemType Directory -Path $TempDir | Out-Null
-
-            foreach ($z in $ZipFiles) {
-              Expand-Archive -Path $z.FullName -DestinationPath $TempDir -Force
-            }
-
-            if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
-
-            # Compress-Archive expects a wildcard to include contents of temp dir
-            Compress-Archive -Path (Join-Path $TempDir '*') -DestinationPath $FinalZip -Force
-
-            Remove-Item -Path $TempDir -Recurse -Force
+            # Fallback: remove any trailing .0 and non-digit/dot chars
+            $ver = $FirstVer -replace '\.0+$','' -replace '[^0-9\.]',''
+            $ShortEngine = "UE$ver"
           }
+
+          $Timestamp = '${{ steps.date.outputs.timestamp }}'
+          $FinalZip = Join-Path $OutputDir ("VMCLiveLink-$Timestamp.zip")
+
+          # Create a temp directory which will contain the top-level engine folder
+          $TempDir = Join-Path $env:TEMP ('fabzip_' + [Guid]::NewGuid().ToString())
+          New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+          $TargetRoot = Join-Path $TempDir $ShortEngine
+          $TargetPlugins = Join-Path $TargetRoot 'Plugins'
+          $TargetVMCL = Join-Path $TargetPlugins 'VMCLiveLink'
+          $TargetVRM  = Join-Path $TargetPlugins 'VRMInterchange'
+
+          New-Item -ItemType Directory -Path $TargetVMCL -Force | Out-Null
+          New-Item -ItemType Directory -Path $TargetVRM  -Force | Out-Null
+
+          # Extract each Fab zip into the correct plugin folder so the final zip will have:
+          # <ShortEngine>/Plugins/VMCLiveLink/... and <ShortEngine>/Plugins/VRMInterchange/...
+          foreach ($z in $ZipFiles) {
+            if ($z.Name -match 'VRMInterchange') {
+              Write-Host "Extracting $($z.Name) to $TargetVRM"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetVRM -Force
+            } elseif ($z.Name -match 'VMCLiveLink') {
+              Write-Host "Extracting $($z.Name) to $TargetVMCL"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetVMCL -Force
+            } else {
+              Write-Warning "Zip $($z.Name) did not match a known plugin; extracting to Plugins root"
+              Expand-Archive -Path $z.FullName -DestinationPath $TargetPlugins -Force
+            }
+          }
+
+          if (Test-Path $FinalZip) { Remove-Item $FinalZip -Force }
+
+          # Compress the temp dir's contents (which includes the ShortEngine folder) so the zip will contain the top-level folder
+          Compress-Archive -Path (Join-Path $TempDir '*') -DestinationPath $FinalZip -Force
+
+          Remove-Item -Path $TempDir -Recurse -Force
 
       - name: Upload artifact (single zip)
         uses: actions/upload-artifact@v4
         with:
           name: VMCLiveLink
-          path: FabBuilds\VMCLiveLink.zip
+          path: FabBuilds\VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
           if-no-files-found: error
-
-      - name: Get current timestamp
-        id: date
-        run: echo "timestamp=$(Get-Date -Format 'yyyyMMdd-HHmmss')" >> $env:GITHUB_OUTPUT
-        shell: powershell
 
       - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}-run${{ github.run_number }}
           release_name: ${{ github.ref_name }}-${{ steps.date.outputs.timestamp }}
-          body: "Automated release created by CI for ${{ github.ref_name }}."
+          body: "Automated release created by CI for ${{ github.ref_name }}. The run number is included in the release tag for traceability."
           draft: false
           prerelease: false
 
@@ -121,6 +155,6 @@ jobs:
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: FabBuilds\VMCLiveLink.zip
-          asset_name: VMCLiveLink.zip
+          asset_path: FabBuilds\VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
+          asset_name: VMCLiveLink-${{ steps.date.outputs.timestamp }}.zip
           asset_content_type: application/zip
