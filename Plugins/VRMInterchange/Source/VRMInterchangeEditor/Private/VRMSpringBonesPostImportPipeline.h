@@ -19,17 +19,21 @@ public:
     UVRMSpringBonesPostImportPipeline() = default;
 
 #if WITH_EDITOR
-    UPROPERTY(EditAnywhere, Category = "VRM Spring")
-    bool bGenerateSpringBoneData = false;
+    // Exposed to the import dialog; default value will be initialized from project settings
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Generate Spring Bone Data", ToolTip="Parse VRM spring bone extensions and create a SpringBones DataAsset next to the imported mesh."))
+    bool bGenerateSpringBoneData = true;
 
-    UPROPERTY(EditAnywhere, Category = "VRM Spring")
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Overwrite Existing", ToolTip="Overwrite existing generated assets. If disabled, a unique name will be chosen."))
     bool bOverwriteExisting = false;
 
-    UPROPERTY(EditAnywhere, Category = "VRM Spring")
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Sub-Folder"))
     FString SubFolder = TEXT("SpringBones");
 
-    UPROPERTY(EditAnywhere, Category = "VRM Spring")
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Data Asset Name"))
     FString DataAssetName = TEXT("SpringBonesData");
+
+    // Initialize per-instance defaults from project settings so the import dialog reflects user preferences
+    virtual void PostInitProperties() override;
 #endif
 
     // UInterchangePipelineBase

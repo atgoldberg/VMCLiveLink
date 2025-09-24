@@ -1,4 +1,5 @@
-﻿// VRMSpringBonesPostImportPipeline.cpp
+﻿#include "CoreMinimal.h"
+// VRMSpringBonesPostImportPipeline.cpp
 // Fixed: Removed immediate package saving during import to prevent interference with main VRM import process
 // The pipeline now defers saving to Unreal's asset management system to avoid race conditions and resource conflicts
 #include "VRMSpringBonesPostImportPipeline.h"
@@ -24,6 +25,9 @@
 #include "VRMSpringBonesParser.h"
 #include "VRMInterchangeLog.h"
 
+// Project settings for defaults
+#include "VRMInterchangeSettings.h"
+
 // cgltf support (needed by other TUs in the module). Provide implementation here when available.
 #if !defined(VRM_HAS_CGLTF)
 #  if defined(__has_include)
@@ -43,11 +47,35 @@
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
 
+#if WITH_EDITOR
+void UVRMSpringBonesPostImportPipeline::PostInitProperties()
+{
+    Super::PostInitProperties();
+
+    // Initialize instance defaults from project settings so the import dialog shows current preferences
+    if (!HasAnyFlags(RF_ClassDefaultObject))
+    {
+        const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>();
+        if (Settings)
+        {
+            // Only apply if the values are at their compiled defaults to avoid clobbering an explicitly configured pipeline asset
+            bGenerateSpringBoneData = Settings->bGenerateSpringBoneData;
+            bOverwriteExisting = Settings->bOverwriteExistingSpringAssets;
+        }
+    }
+}
+#endif
+
 void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
+    // Pull defaults from project settings, but allow per-instance overrides from the pipeline object
+    const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>();
+    const bool bWantsSpringData = (bGenerateSpringBoneData || (Settings && Settings->bGenerateSpringBoneData));
+    const bool bWantsOverwrite = (bOverwriteExisting || (Settings && Settings->bOverwriteExistingSpringAssets));
+
     // Early exit if spring bone generation is disabled or if we don't have the required inputs
-    if (!bGenerateSpringBoneData || !BaseNodeContainer)
+    if (!bWantsSpringData || !BaseNodeContainer)
     {
         return;
     }
@@ -96,7 +124,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
 
     // Ensure unique or overwrite as requested
     FString FinalPackageName = PackagePath / AssetName;
-    if (!bOverwriteExisting)
+    if (!bWantsOverwrite)
     {
         FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
         AssetToolsModule.Get().CreateUniqueAssetName(FinalPackageName, TEXT(""), FinalPackageName, AssetName);
@@ -120,6 +148,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     }
 
     // Find or create the asset (be more defensive about existing assets)
+    bool bIsNewAsset = false;
     UVRMSpringBoneData* Data = FindObject<UVRMSpringBoneData>(Package, *AssetName);
     if (!Data)
     {
@@ -131,6 +160,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         }
         
         Data = NewObject<UVRMSpringBoneData>(Package, *AssetName, RF_Public | RF_Standalone);
+        bIsNewAsset = true;
     }
     if (!Data)
     {
@@ -143,6 +173,12 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     {
         UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: No spring data found in '%s'."), *Filename);
         return;
+    }
+
+    // If this is a new asset, notify the asset registry so it appears in Content Browser
+    if (bIsNewAsset)
+    {
+        FAssetRegistryModule::AssetCreated(Data);
     }
 
     // Resolve BoneName / CenterBoneName by re-parsing the source glTF/VRM with cgltf

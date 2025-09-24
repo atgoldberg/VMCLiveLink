@@ -12,7 +12,7 @@ public:
 	UVRMInterchangeSettings();
 
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="Parse and generate spring bone data assets during import."))
-    bool bGenerateSpringBoneData = false;
+    bool bGenerateSpringBoneData = true;
 
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="Duplicate and assign a Post-Process AnimBP to drive springs."))
     bool bGeneratePostProcessAnimBP = false;
