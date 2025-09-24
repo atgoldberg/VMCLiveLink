@@ -16,7 +16,7 @@
       "Name": "VRMInterchangeEditor",
       "Type": "Editor",
       "LoadingPhase": "PreDefault",
-      "EnabledByDefault": true
+      "EnabledByDefault": true,
 			"IncludeListPlatforms": [ "Win64" ]
 
     }

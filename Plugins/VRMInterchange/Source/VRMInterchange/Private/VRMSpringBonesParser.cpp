@@ -72,6 +72,23 @@ namespace
         return FVector((float)GetF((*Arr)[0]), (float)GetF((*Arr)[1]), (float)GetF((*Arr)[2]));
     }
 
+    // Helper: field can be either a number node index or an object { "node": <index> }
+    static bool TryGetNodeIndexFlexible(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Field, int32& OutIndex)
+    {
+        OutIndex = INDEX_NONE;
+        if (!Obj.IsValid()) return false;
+        if (Obj->TryGetNumberField(Field, OutIndex))
+        {
+            return true;
+        }
+        const TSharedPtr<FJsonObject>* Inner = nullptr;
+        if (Obj->TryGetObjectField(Field, Inner) && Inner && Inner->IsValid())
+        {
+            return (*Inner)->TryGetNumberField(TEXT("node"), OutIndex);
+        }
+        return false;
+    }
+
     // VRM 1.0
     static bool ParseVRM1(const TSharedPtr<FJsonObject>& Root, FVRMSpringConfig& Out, FString& OutError)
     {
@@ -164,11 +181,11 @@ namespace
             }
         }
 
-        // joints
-        const TArray<TSharedPtr<FJsonValue>>* Joints = nullptr;
-        if ((*Spring)->TryGetArrayField(TEXT("joints"), Joints) && Joints)
+        // Optional top-level joints array (some exporters place joints here)
+        const TArray<TSharedPtr<FJsonValue>>* TopJoints = nullptr;
+        if ((*Spring)->TryGetArrayField(TEXT("joints"), TopJoints) && TopJoints)
         {
-            for (const TSharedPtr<FJsonValue>& JV : *Joints)
+            for (const TSharedPtr<FJsonValue>& JV : *TopJoints)
             {
                 const TSharedPtr<FJsonObject>* JObj = nullptr;
                 if (!JV.IsValid() || !JV->TryGetObject(JObj) || !JObj || !JObj->IsValid()) continue;
@@ -191,7 +208,11 @@ namespace
 
                 FVRMSpring S;
                 (*SObj)->TryGetStringField(TEXT("name"), S.Name);
-                (*SObj)->TryGetNumberField(TEXT("center"), S.CenterNodeIndex);
+
+                // center can be a number or an object { node: <index> }
+                TryGetNodeIndexFlexible(*SObj, TEXT("center"), S.CenterNodeIndex);
+
+                // Spring-level parameters are optional in VRM1 (often per-joint), keep parsing if present
                 (*SObj)->TryGetNumberField(TEXT("stiffness"), S.Stiffness);
                 (*SObj)->TryGetNumberField(TEXT("drag"), S.Drag);
                 S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0, 0, -1));
@@ -203,9 +224,26 @@ namespace
                 {
                     for (const TSharedPtr<FJsonValue>& JV : *SJ)
                     {
-                        S.JointIndices.Add((int32)JV->AsNumber());
+                        // joints entry can be a number (index into top-level joints) or an object with node and params
+                        const TSharedPtr<FJsonObject>* JObj = nullptr;
+                        if (JV.IsValid() && JV->TryGetObject(JObj) && JObj && JObj->IsValid())
+                        {
+                            // Create a joint entry based on this object
+                            FVRMSpringJoint J;
+                            (*JObj)->TryGetNumberField(TEXT("node"), J.NodeIndex);
+                            (*JObj)->TryGetNumberField(TEXT("hitRadius"), J.HitRadius);
+
+                            const int32 NewJointIndex = Out.Joints.Add(MoveTemp(J));
+                            S.JointIndices.Add(NewJointIndex);
+                        }
+                        else
+                        {
+                            // Fallback: assume it's a numeric index
+                            S.JointIndices.Add((int32)JV->AsNumber());
+                        }
                     }
                 }
+
                 const TArray<TSharedPtr<FJsonValue>>* CG = nullptr;
                 if ((*SObj)->TryGetArrayField(TEXT("colliderGroups"), CG) && CG)
                 {

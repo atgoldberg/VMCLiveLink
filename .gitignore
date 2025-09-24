@@ -23,3 +23,6 @@ Packaged/
 Releases/
 /Plugins/VRM4U/.github/ISSUE_TEMPLATE
 /Plugins/VRM4U
+diff Plugins
+/diff Plugins/VRMInterchange/Source/VRMInterchange/Private/VRMTranslator.cpp
+/Plugins/VRMInterchange/Config/DefaultEditor.ini

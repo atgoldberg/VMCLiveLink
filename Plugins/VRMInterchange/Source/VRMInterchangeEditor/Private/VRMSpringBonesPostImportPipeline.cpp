@@ -17,15 +17,27 @@
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
 #include "Misc/SecureHash.h"
-#include "UObject/SavePackage.h" // SavePackage
+
+// Removed explicit SavePackage include to avoid saving during pipeline execution
 
 // NEW: use shared parser + log category
 #include "VRMSpringBonesParser.h"
 #include "VRMInterchangeLog.h"
 
-// Include cgltf locally to resolve node index -> name
-#define CGLTF_IMPLEMENTATION
-#include "cgltf.h"
+// cgltf support (needed by other TUs in the module). Provide implementation here when available.
+#if !defined(VRM_HAS_CGLTF)
+#  if defined(__has_include)
+#    if __has_include("cgltf.h")
+#      define CGLTF_IMPLEMENTATION
+#      include "cgltf.h"
+#      define VRM_HAS_CGLTF 1
+#    else
+#      define VRM_HAS_CGLTF 0
+#    endif
+#  else
+#    define VRM_HAS_CGLTF 0
+#  endif
+#endif
 
 // For skeleton validation
 #include "Animation/Skeleton.h"
@@ -65,6 +77,8 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     FString PackagePath, AssetName;
     MakeTargetPathAndName(Filename, ContentBasePath, PackagePath, AssetName);
 
+    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: BasePath='%s' => CharacterPath='%s'"), *ContentBasePath, *PackagePath);
+
     // Keep a root search path for skeleton validation (without SubFolder)
     const FString SkeletonSearchRoot = PackagePath;
 
@@ -77,6 +91,8 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     {
         PackagePath = PackagePath / SubFolder;
     }
+
+    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: FinalPackagePath='%s'"), *PackagePath);
 
     // Ensure unique or overwrite as requested
     FString FinalPackageName = PackagePath / AssetName;
@@ -92,12 +108,11 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         LongPackageName = TEXT("/") + LongPackageName;
     }
 
-    // Create the package if needed (use FindPackage first to avoid conflicts)
-    UPackage* Package = FindPackage(nullptr, *LongPackageName);
-    if (!Package)
-    {
-        Package = CreatePackage(*LongPackageName);
-    }
+    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: FinalAssetPath='%s'"), *LongPackageName);
+
+    // Create the package if needed
+    UPackage* Package = CreatePackage(*LongPackageName);
+
     if (!Package)
     {
         UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Failed to create/find package '%s'."), *LongPackageName);
@@ -192,18 +207,14 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         }
     }
 
-    // Mark asset as created but defer saving to avoid conflicts with main import process
+
+    // Register the asset but do NOT save packages here; saving during pipeline execution can
+    // interfere with Interchange factory import (locks packages and can break asset creation).
+
     Data->MarkPackageDirty();
     Package->SetDirtyFlag(true);
-    FAssetRegistryModule::AssetCreated(Data);
-    
-    // Note: We intentionally do NOT call UPackage::SavePackage() here because:
-    // 1. This pipeline runs during the main import process 
-    // 2. Saving packages during import can cause race conditions and resource conflicts
-    // 3. The main import system will handle saving assets appropriately
-    // 4. The asset will be saved when the user saves the project or when UE decides to save dirty packages
-    
-    UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Created spring bone data '%s' (will be saved by main import system)"), *Data->GetPathName());
+    UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Authored '%s' (will be saved by the import system)"), *Data->GetPathName());
+
 #endif
 }
 
@@ -226,17 +237,30 @@ bool UVRMSpringBonesPostImportPipeline::ParseAndFillDataAssetFromFile(const FStr
 
 FString UVRMSpringBonesPostImportPipeline::MakeTargetPathAndName(const FString& SourceFilename, const FString& ContentBasePath, FString& OutPackagePath, FString& OutAssetName) const
 {
-    // Prefer the import's ContentBasePath (points to the imported asset's folder)
+    // Character folder name derived from the source file base name
+    const FString BaseName = FPaths::GetBaseFilename(SourceFilename);
+
     if (!ContentBasePath.IsEmpty())
     {
         OutPackagePath = ContentBasePath;
+        // Remove any trailing slash to analyze the last segment correctly
+        while (OutPackagePath.Len() > 1 && (OutPackagePath.EndsWith(TEXT("/")) || OutPackagePath.EndsWith(TEXT("\\"))))
+        {
+            OutPackagePath.LeftChopInline(1);
+        }
+        const FString LastSegment = FPaths::GetCleanFilename(OutPackagePath);
+        if (!LastSegment.Equals(BaseName, ESearchCase::IgnoreCase))
+        {
+            OutPackagePath = OutPackagePath / BaseName; // ensure /.../<VRMCharacterName>
+        }
     }
     else
     {
-        const FString BaseName = FPaths::GetBaseFilename(SourceFilename);
+        // Fallback: derive from source file name
         OutPackagePath = FString::Printf(TEXT("/Game/%s"), *BaseName);
     }
 
+    // Name defaults
     OutAssetName = TEXT("SpringBonesData");
     return OutPackagePath / OutAssetName;
 }
@@ -244,6 +268,7 @@ FString UVRMSpringBonesPostImportPipeline::MakeTargetPathAndName(const FString& 
 // Resolve BoneName and CenterBoneName using cgltf node names
 bool UVRMSpringBonesPostImportPipeline::ResolveBoneNamesFromFile(const FString& Filename, FVRMSpringConfig& InOut, int32& OutResolvedColliders, int32& OutResolvedJoints, int32& OutResolvedCenters) const
 {
+#if VRM_HAS_CGLTF
     OutResolvedColliders = 0;
     OutResolvedJoints = 0;
     OutResolvedCenters = 0;
@@ -271,7 +296,8 @@ bool UVRMSpringBonesPostImportPipeline::ResolveBoneNamesFromFile(const FString& 
         const cgltf_node* N = &Data->nodes[NodeIndex];
         if (N && N->name && N->name[0] != '\0')
         {
-            return FName(UTF8_TO_TCHAR(N->name));
+            const FString NameStr = UTF8_TO_TCHAR(N->name);
+            return FName(*NameStr);
         }
         return NAME_None;
     };
@@ -319,6 +345,11 @@ bool UVRMSpringBonesPostImportPipeline::ResolveBoneNamesFromFile(const FString& 
     }
 
     return (OutResolvedColliders + OutResolvedJoints + OutResolvedCenters) > 0;
+#else
+    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: cgltf.h not available; skipping bone name resolution."));
+    OutResolvedColliders = OutResolvedJoints = OutResolvedCenters = 0;
+    return false;
+#endif
 }
 
 // Validate BoneNames against a USkeleton under the imported asset's folder
