@@ -109,7 +109,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     if (!Data)
     {
         // Double-check that we won't be creating a conflicting asset
-        if (Package->FindExportObject(UVRMSpringBoneData::StaticClass(), *AssetName))
+        if (Package->FindExportObject(UVRMSpringBoneData::StaticClass(), FName(*AssetName)))
         {
             UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Asset '%s' already exists with different type in package '%s'."), *AssetName, *LongPackageName);
             return;
