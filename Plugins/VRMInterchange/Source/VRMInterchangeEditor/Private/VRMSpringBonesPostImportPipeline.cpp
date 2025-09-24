@@ -31,6 +31,7 @@
 void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
+    // Early exit if spring bone generation is disabled or if we don't have the required inputs
     if (!bGenerateSpringBoneData || !BaseNodeContainer)
     {
         return;
@@ -88,18 +89,29 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         LongPackageName = TEXT("/") + LongPackageName;
     }
 
-    // Create the package if needed
-    UPackage* Package = CreatePackage(*LongPackageName);
+    // Create the package if needed (use FindPackage first to avoid conflicts)
+    UPackage* Package = FindPackage(nullptr, *LongPackageName);
+    if (!Package)
+    {
+        Package = CreatePackage(*LongPackageName);
+    }
     if (!Package)
     {
         UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Failed to create/find package '%s'."), *LongPackageName);
         return;
     }
 
-    // Find or create the asset
+    // Find or create the asset (be more defensive about existing assets)
     UVRMSpringBoneData* Data = FindObject<UVRMSpringBoneData>(Package, *AssetName);
     if (!Data)
     {
+        // Double-check that we won't be creating a conflicting asset
+        if (Package->FindExportObject(UVRMSpringBoneData::StaticClass(), *AssetName))
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Asset '%s' already exists with different type in package '%s'."), *AssetName, *LongPackageName);
+            return;
+        }
+        
         Data = NewObject<UVRMSpringBoneData>(Package, *AssetName, RF_Public | RF_Standalone);
     }
     if (!Data)
@@ -177,36 +189,18 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         }
     }
 
-    // Mark and save
+    // Mark asset as created but defer saving to avoid conflicts with main import process
     Data->MarkPackageDirty();
-    FAssetRegistryModule::AssetCreated(Data);
     Package->SetDirtyFlag(true);
-
-    // Explicitly save package to disk under the imported asset's folder
-    {
-        FString PackageFilename;
-        if (FPackageName::TryConvertLongPackageNameToFilename(LongPackageName, PackageFilename, FPackageName::GetAssetPackageExtension()))
-        {
-            FSavePackageArgs SaveArgs;
-            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-            SaveArgs.SaveFlags = SAVE_NoError;
-            SaveArgs.Error = GError;
-            if (!UPackage::SavePackage(Package, Data, *PackageFilename, SaveArgs))
-            {
-                UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Failed to save package '%s'."), *LongPackageName);
-            }
-            else
-            {
-                UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: Saved package '%s'."), *LongPackageName);
-            }
-        }
-        else
-        {
-            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Could not convert '%s' to filename for saving."), *LongPackageName);
-        }
-    }
-
-    UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Authored '%s'"), *Data->GetPathName());
+    FAssetRegistryModule::AssetCreated(Data);
+    
+    // Note: We intentionally do NOT call UPackage::SavePackage() here because:
+    // 1. This pipeline runs during the main import process 
+    // 2. Saving packages during import can cause race conditions and resource conflicts
+    // 3. The main import system will handle saving assets appropriately
+    // 4. The asset will be saved when the user saves the project or when UE decides to save dirty packages
+    
+    UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Created spring bone data '%s' (will be saved by main import system)"), *Data->GetPathName());
 #endif
 }
 
