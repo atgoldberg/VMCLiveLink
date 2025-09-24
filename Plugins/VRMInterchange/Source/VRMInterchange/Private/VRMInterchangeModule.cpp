@@ -2,6 +2,7 @@
 #include "Modules/ModuleManager.h"
 #include "InterchangeManager.h"
 #include "Misc/CoreDelegates.h"
+#include "Engine.h"
 #include "VRMTranslator.h"
 
 class FVRMInterchangeModule : public IModuleInterface
