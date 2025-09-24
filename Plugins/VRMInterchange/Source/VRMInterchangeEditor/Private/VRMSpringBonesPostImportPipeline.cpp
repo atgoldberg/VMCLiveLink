@@ -1,4 +1,7 @@
-﻿#include "VRMSpringBonesPostImportPipeline.h"
+﻿// VRMSpringBonesPostImportPipeline.cpp
+// Fixed: Removed immediate package saving during import to prevent interference with main VRM import process
+// The pipeline now defers saving to Unreal's asset management system to avoid race conditions and resource conflicts
+#include "VRMSpringBonesPostImportPipeline.h"
 #include "VRMSpringBoneData.h"
 
 #include "InterchangeSourceData.h"
