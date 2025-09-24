@@ -11,6 +11,7 @@ class UVRMSpringBoneData;
 class USkeleton;
 class USkeletalMesh;
 struct FVRMSpringConfig;
+struct FAssetData; // fwd declare for deferred callback
 
 UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced, ClassGroup=(Interchange), meta=(DisplayName="VRM Spring Bones (Post-Import)"))
 class VRMINTERCHANGEEDITOR_API UVRMSpringBonesPostImportPipeline : public UInterchangePipelineBase
@@ -62,6 +63,23 @@ private:
     UObject* DuplicateTemplateAnimBlueprint(const FString& TargetPackagePath, const FString& BaseName, USkeleton* TargetSkeleton) const;
     bool SetSpringConfigOnAnimBlueprint(UObject* AnimBlueprintObj, UVRMSpringBoneData* SpringData) const;
     bool AssignPostProcessABPToMesh(USkeletalMesh* SkelMesh, UObject* AnimBlueprintObj) const;
+
+    // Package path helper
+    FString GetParentPackagePath(const FString& InPath) const;
+
+    // Deferred ABP scaffolding when skeletal assets are not yet available
+    void RegisterDeferredABP(const FString& InSkeletonSearchRoot, const FString& InPackagePath, UVRMSpringBoneData* InSpringData, bool bInWantsAssign);
+    void UnregisterDeferredABP();
+    void OnAssetAddedForDeferredABP(const struct FAssetData& AssetData);
+
+    // Deferred state
+    FDelegateHandle DeferredHandle;
+    FString DeferredSkeletonSearchRoot;
+    FString DeferredAltSkeletonSearchRoot; // parent of root
+    FString DeferredPackagePath;
+    TWeakObjectPtr<UVRMSpringBoneData> DeferredSpringDataAsset;
+    bool bDeferredWantsAssign = false;
+    bool bDeferredCompleted = false;
 #endif
 };
 
