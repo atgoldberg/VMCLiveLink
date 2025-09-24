@@ -124,7 +124,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     if (!Data)
     {
         // Double-check that we won't be creating a conflicting asset
-        if (Package->FindExportObject(UVRMSpringBoneData::StaticClass(), FName(*AssetName)))
+        if (FindObject<UObject>(Package, *AssetName))
         {
             UE_LOG(LogVRMSpring, Warning, TEXT("[VRMInterchange] Spring pipeline: Asset '%s' already exists with different type in package '%s'."), *AssetName, *LongPackageName);
             return;
@@ -242,21 +242,12 @@ FString UVRMSpringBonesPostImportPipeline::MakeTargetPathAndName(const FString& 
 
     if (!ContentBasePath.IsEmpty())
     {
-        OutPackagePath = ContentBasePath;
-        // Remove any trailing slash to analyze the last segment correctly
-        while (OutPackagePath.Len() > 1 && (OutPackagePath.EndsWith(TEXT("/")) || OutPackagePath.EndsWith(TEXT("\\"))))
-        {
-            OutPackagePath.LeftChopInline(1);
-        }
-        const FString LastSegment = FPaths::GetCleanFilename(OutPackagePath);
-        if (!LastSegment.Equals(BaseName, ESearchCase::IgnoreCase))
-        {
-            OutPackagePath = OutPackagePath / BaseName; // ensure /.../<VRMCharacterName>
-        }
+        // Always ensure we are under the character folder, mirroring Materials/Textures layout
+        OutPackagePath = (ContentBasePath / BaseName);
     }
     else
     {
-        // Fallback: derive from source file name
+        // Fallback: derive from source file name under /Game
         OutPackagePath = FString::Printf(TEXT("/Game/%s"), *BaseName);
     }
 
