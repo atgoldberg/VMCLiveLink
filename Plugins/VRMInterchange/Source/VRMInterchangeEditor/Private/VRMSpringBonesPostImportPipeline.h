@@ -9,6 +9,7 @@ class UInterchangeBaseNodeContainer;
 class UInterchangeSourceData;
 class UVRMSpringBoneData;
 class USkeleton;
+class USkeletalMesh;
 struct FVRMSpringConfig;
 
 UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced, ClassGroup=(Interchange), meta=(DisplayName="VRM Spring Bones (Post-Import)"))
@@ -25,6 +26,16 @@ public:
 
     UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Overwrite Existing", ToolTip="Overwrite existing generated assets. If disabled, a unique name will be chosen."))
     bool bOverwriteExisting = false;
+
+    // Phase 3 controls
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Generate Post-Process AnimBP", ToolTip="Duplicate a template Post-Process AnimBlueprint next to the imported mesh."))
+    bool bGeneratePostProcessAnimBP = false;
+
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Assign Post-Process AnimBP", ToolTip="Assign the duplicated Post-Process AnimBP to the imported SkeletalMesh."))
+    bool bAssignPostProcessABP = false;
+
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Animation Sub-Folder"))
+    FString AnimationSubFolder = TEXT("Animation");
 
     UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Sub-Folder"))
     FString SubFolder = TEXT("SpringBones");
@@ -45,6 +56,12 @@ private:
     FString MakeTargetPathAndName(const FString& SourceFilename, const FString& ContentBasePath, FString& OutPackagePath, FString& OutAssetName) const;
     bool ResolveBoneNamesFromFile(const FString& Filename, FVRMSpringConfig& InOut, int32& OutResolvedColliders, int32& OutResolvedJoints, int32& OutResolvedCenters) const;
     void ValidateBoneNamesAgainstSkeleton(const FString& SearchRootPackagePath, const FVRMSpringConfig& Config) const;
+
+    // Phase 3 helpers
+    bool FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const;
+    UObject* DuplicateTemplateAnimBlueprint(const FString& TargetPackagePath, const FString& BaseName, USkeleton* TargetSkeleton) const;
+    bool SetSpringConfigOnAnimBlueprint(UObject* AnimBlueprintObj, UVRMSpringBoneData* SpringData) const;
+    bool AssignPostProcessABPToMesh(USkeletalMesh* SkelMesh, UObject* AnimBlueprintObj) const;
 #endif
 };
 

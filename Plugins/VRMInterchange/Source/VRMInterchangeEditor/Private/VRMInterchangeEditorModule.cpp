@@ -1,4 +1,5 @@
 // Minimal module entry point for the editor module.
+#include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 #include "VRMSpringBonesPostImportPipeline.h"
 #include "InterchangeManager.h"
