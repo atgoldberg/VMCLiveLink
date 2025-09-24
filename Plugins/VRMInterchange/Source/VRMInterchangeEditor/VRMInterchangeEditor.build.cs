@@ -28,6 +28,7 @@ public class VRMInterchangeEditor : ModuleRules
             "InterchangeEditor",
             "InterchangeNodes",
             "InterchangeFactoryNodes",
+            "InterchangePipelines",  // Add this line
             "DeveloperSettings",
             // Asset authoring
             "AssetRegistry",
