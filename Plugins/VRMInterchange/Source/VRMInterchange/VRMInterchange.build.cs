@@ -8,13 +8,15 @@ public class VRMInterchange : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
+        // Public: our public headers expose Interchange Import interfaces
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",
             "CoreUObject",
             "Engine",
-            // If you expose Interchange types in public headers:
-            // "InterchangeCore",
+            // Expose Interchange types in public headers
+            "InterchangeCore",
+            "InterchangeImport",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -27,9 +29,9 @@ public class VRMInterchange : ModuleRules
             // Required for FMeshDescription and attribute APIs
             "MeshDescription",
             "StaticMeshDescription",
-            "SkeletalMeshDescription", // FSkeletalMeshAttributes and skin weights
-            "AnimationCore",           // UE::AnimationCore::FBoneWeights
-            "ImageWrapper",            // for ImageWrapperModule.h (used by translator)
+            "SkeletalMeshDescription",
+            "AnimationCore",
+            "ImageWrapper",
             "Json"                     // for FJsonSerializer/FJsonReader/etc.
             // If you start using FJsonObjectConverter:
             // "JsonUtilities"
