@@ -2,27 +2,18 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 #include "VRMSpringBonesPostImportPipeline.h"
-#include "InterchangeManager.h"
-#include "UObject/UObjectIterator.h"
-#include "UObject/Class.h"
-#include "InterchangePipelineBase.h"
-
-// NEW: programmatic pipeline stack append
 #include "InterchangeProjectSettings.h"
 #include "VRMTranslator.h"
-
-// For asset lookup
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "Misc/PackageName.h"
-#include "UObject/Package.h"
+#include "VRMDeletedImportManager.h"
+#include "VRMSpringBoneData.h"
+#include "Editor.h"
 
 namespace
 {
 #if WITH_EDITOR
 static UObject* FindPluginDefaultSpringBonesPipelineAsset()
 {
-	// Look for the pipeline asset shipped in the plugin content
-	// Mount point for plugin content is "/VRMInterchange"
 	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultSpringBonesPipeline.DefaultSpringBonesPipeline");
 	if (UObject* Existing = StaticLoadObject(UVRMSpringBonesPostImportPipeline::StaticClass(), nullptr, PluginObjectPath))
 	{
@@ -33,84 +24,60 @@ static UObject* FindPluginDefaultSpringBonesPipelineAsset()
 
 static void AppendVRMSpringBonesPipeline()
 {
-	// Get mutable project settings (Content Import Settings)
 	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>();
-	if (!Settings)
-	{
-		return;
-	}
-
-	// Work on Content (not Scene) import settings
-	FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings, /*bIsSceneImport*/ false);
-
-	// Only touch the "Assets" stack if it exists; do not create or override user stacks
+	if (!Settings) return;
+	FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings, false);
 	FInterchangePipelineStack* AssetsStack = ImportSettings.PipelineStacks.Find(TEXT("Assets"));
-	if (!AssetsStack)
-	{
-		// Respect existing configs; do nothing if the user renamed/removed the default stack
-		return;
-	}
-
-	// Find or create the per-translator entry for our VRM translator
+	if (!AssetsStack) return;
 	const FString TranslatorPath = UVRMTranslator::StaticClass()->GetPathName();
 	FInterchangeTranslatorPipelines* Per = nullptr;
 	for (FInterchangeTranslatorPipelines& It : AssetsStack->PerTranslatorPipelines)
 	{
-		if (It.Translator.ToSoftObjectPath().ToString() == TranslatorPath)
-		{
-			Per = &It;
-			break;
-		}
+		if (It.Translator.ToSoftObjectPath().ToString() == TranslatorPath) { Per = &It; break; }
 	}
 	if (!Per)
 	{
-		FInterchangeTranslatorPipelines NewEntry;
-		NewEntry.Translator = UVRMTranslator::StaticClass();
-		// Start with the base stack pipelines to preserve defaults
-		NewEntry.Pipelines = AssetsStack->Pipelines;
-		AssetsStack->PerTranslatorPipelines.Add(MoveTemp(NewEntry));
-		Per = &AssetsStack->PerTranslatorPipelines.Last();
+		FInterchangeTranslatorPipelines NewEntry; NewEntry.Translator = UVRMTranslator::StaticClass(); NewEntry.Pipelines = AssetsStack->Pipelines; AssetsStack->PerTranslatorPipelines.Add(MoveTemp(NewEntry)); Per = &AssetsStack->PerTranslatorPipelines.Last();
 	}
-
-	// Prefer the plugin asset; if not found, fall back to class path
 	const FSoftObjectPath SpringClassPath(TEXT("/Script/VRMInterchangeEditor.VRMSpringBonesPostImportPipeline"));
-
-	auto ContainsPath = [&](const FSoftObjectPath& P)
+	auto ContainsPath=[&](const FSoftObjectPath& P){ for(const FSoftObjectPath& Existing:Per->Pipelines){ if(Existing.ToString()==P.ToString()) return true;} return false; };
+	bool bDirty=false;
+	if (UObject* PluginPipeline=FindPluginDefaultSpringBonesPipelineAsset())
 	{
-		for (const FSoftObjectPath& Existing : Per->Pipelines)
-		{
-			if (Existing.ToString() == P.ToString())
-			{
-				return true;
-			}
-		}
-		return false;
-	};
-
-	bool bDirty = false;
-
-	if (UObject* PluginPipeline = FindPluginDefaultSpringBonesPipelineAsset())
-	{
-		const FSoftObjectPath SpringAssetPath(PluginPipeline);
-		if (!ContainsPath(SpringAssetPath))
-		{
-			Per->Pipelines.Add(SpringAssetPath);
-			bDirty = true;
-		}
+		const FSoftObjectPath SpringAssetPath(PluginPipeline); if(!ContainsPath(SpringAssetPath)){ Per->Pipelines.Add(SpringAssetPath); bDirty=true; }
 	}
-	else
-	{
-		// Safe fallback: add by class so import still works without the asset
-		if (!ContainsPath(SpringClassPath))
-		{
-			Per->Pipelines.Add(SpringClassPath);
-			bDirty = true;
-		}
-	}
+	else if(!ContainsPath(SpringClassPath)) { Per->Pipelines.Add(SpringClassPath); bDirty=true; }
+	if(bDirty) Settings->SaveConfig();
+}
 
-	if (bDirty)
+// Track hashes of spring data assets created this session but never (successfully) saved.
+static TSet<FString> GUnsavedSpringDataHashes;
+
+static void RegisterSpringDataCreation(UVRMSpringBoneData* Asset)
+{
+	if (Asset && !Asset->SourceHash.IsEmpty())
 	{
-		Settings->SaveConfig();
+		GUnsavedSpringDataHashes.Add(Asset->SourceHash);
+	}
+}
+
+static void RegisterSpringDataSaved(UVRMSpringBoneData* Asset)
+{
+	if (Asset && !Asset->SourceHash.IsEmpty())
+	{
+		GUnsavedSpringDataHashes.Remove(Asset->SourceHash);
+	}
+}
+
+static void HandlePreExit()
+{
+	if (GUnsavedSpringDataHashes.Num() > 0)
+	{
+		for (const FString& Hash : GUnsavedSpringDataHashes)
+		{
+			FVRMDeletedImportManager::Get().Add(Hash);
+		}
+		GUnsavedSpringDataHashes.Empty();
 	}
 }
 #endif // WITH_EDITOR
@@ -119,38 +86,40 @@ static void AppendVRMSpringBonesPipeline()
 class FVRMInterchangeEditorModule : public IModuleInterface
 {
 public:
-    virtual void StartupModule() override
-    {
-        // Ensure the pipeline class is linked into the module binary
-        UVRMSpringBonesPostImportPipeline::StaticClass();
-
-        UE_LOG(LogTemp, Log, TEXT("VRMInterchangeEditor module started"));
-
+	virtual void StartupModule() override
+	{
+		UVRMSpringBonesPostImportPipeline::StaticClass();
 #if WITH_EDITOR
-        // Enumerate all loaded UClasses derived from UInterchangePipelineBase
-        const UClass* PipelineBase = UInterchangePipelineBase::StaticClass();
-        int32 Found = 0;
-        for (TObjectIterator<UClass> It; It; ++It)
-        {
-            UClass* C = *It;
-            if (!C->HasAnyClassFlags(CLASS_Deprecated) && C->IsChildOf(PipelineBase))
-            {
-                ++Found;
-                const bool bIsTarget = (C == UVRMSpringBonesPostImportPipeline::StaticClass());
-                UE_LOG(LogTemp, Log, TEXT("Interchange Pipeline subclass found: %s%s"), *C->GetName(), bIsTarget ? TEXT("  <-- target") : TEXT(""));
-            }
-        }
-        UE_LOG(LogTemp, Log, TEXT("Interchange Pipeline subclasses enumerated: %d"), Found);
-
-        // Append our pipeline to the project settings (safe, prefers plugin asset, falls back to class)
-        AppendVRMSpringBonesPipeline();
+		AppendVRMSpringBonesPipeline();
+		FCoreDelegates::OnPreExit.AddStatic(&HandlePreExit);
 #endif
-    }
+	}
 
-    virtual void ShutdownModule() override
-    {
-        UE_LOG(LogTemp, Log, TEXT("VRMInterchangeEditor module shutdown"));
-    }
+	virtual void ShutdownModule() override
+	{
+#if WITH_EDITOR
+		HandlePreExit();
+#endif
+	}
+
+public:
+#if WITH_EDITOR
+	static void NotifySpringDataCreated(UVRMSpringBoneData* Asset); // defined below
+	static void NotifySpringDataSaved(UVRMSpringBoneData* Asset);   // defined below
+#endif
 };
+
+// Out-of-class definitions so a linkable symbol exists (pipeline TU only forward-declares the class)
+#if WITH_EDITOR
+void FVRMInterchangeEditorModule::NotifySpringDataCreated(UVRMSpringBoneData* Asset)
+{
+	RegisterSpringDataCreation(Asset);
+}
+
+void FVRMInterchangeEditorModule::NotifySpringDataSaved(UVRMSpringBoneData* Asset)
+{
+	RegisterSpringDataSaved(Asset);
+}
+#endif
 
 IMPLEMENT_MODULE(FVRMInterchangeEditorModule, VRMInterchangeEditor)
