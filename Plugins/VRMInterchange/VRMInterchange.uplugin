@@ -9,12 +9,14 @@
     {
       "Name": "VRMInterchange",
       "Type": "Runtime",
-      "LoadingPhase": "Default"
+      "LoadingPhase": "Default",
+      "EnabledByDefault": true
     },
     {
       "Name": "VRMInterchangeEditor",
       "Type": "Editor",
-      "LoadingPhase": "Default"
+      "LoadingPhase": "PreDefault",
+      "EnabledByDefault": true
     }
   ],
   "EnabledByDefault": true,

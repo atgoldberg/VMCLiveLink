@@ -4,11 +4,13 @@
 #include "Engine/DeveloperSettings.h"
 #include "VRMInterchangeSettings.generated.h"
 
-UCLASS(config=EditorPerProjectUserSettings, defaultconfig, meta=(DisplayName="VRM Interchange"))
+UCLASS(config=Game, defaultconfig, meta=(DisplayName="VRM Interchange"))
 class VRMINTERCHANGEEDITOR_API UVRMInterchangeSettings : public UDeveloperSettings
 {
     GENERATED_BODY()
 public:
+	UVRMInterchangeSettings();
+
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="Parse and generate spring bone data assets during import."))
     bool bGenerateSpringBoneData = false;
 
