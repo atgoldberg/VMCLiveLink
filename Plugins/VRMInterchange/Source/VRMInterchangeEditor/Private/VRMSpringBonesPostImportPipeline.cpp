@@ -16,6 +16,7 @@
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
 #include "Misc/SecureHash.h"
+#include "UObject/SavePackage.h"
 
 // NEW: use shared parser + log category
 #include "VRMSpringBonesParser.h"
@@ -150,13 +151,52 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
             UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMInterchange] Spring pipeline: No spring data found in '%s'."), *Filename);
             // Continue — we can still generate ABP scaffold if requested, even without spring data.
         }
-        else if (bIsNewSpring)
+        else
         {
-            FAssetRegistryModule::AssetCreated(SpringDataAsset);
+            // Resolve bone names from node indices where possible
+            int32 ResolvedC = 0, ResolvedJ = 0, ResolvedCenters = 0;
+            ResolveBoneNamesFromFile(Filename, SpringDataAsset->SpringConfig, ResolvedC, ResolvedJ, ResolvedCenters);
+
+            // Validate against imported skeleton and log any missing names
+            ValidateBoneNamesAgainstSkeleton(SkeletonSearchRoot, SpringDataAsset->SpringConfig);
+
+            // Provenance
+            SpringDataAsset->SourceFilename = Filename;
+            SpringDataAsset->SourceHash = LexToString(FMD5Hash::HashFile(*Filename));
+
+            // Summary log
+            const TCHAR* SpecStr = TEXT("None");
+            switch (SpringDataAsset->SpringConfig.Spec)
+            {
+            case EVRMSpringSpec::VRM0: SpecStr = TEXT("VRM0"); break;
+            case EVRMSpringSpec::VRM1: SpecStr = TEXT("VRM1"); break;
+            default: break;
+            }
+            UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Parsed %s springs: Springs=%d Joints=%d Colliders=%d Groups=%d  Resolved: Joints=%d Colliders=%d Centers=%d"),
+                SpecStr,
+                SpringDataAsset->SpringConfig.Springs.Num(),
+                SpringDataAsset->SpringConfig.Joints.Num(),
+                SpringDataAsset->SpringConfig.Colliders.Num(),
+                SpringDataAsset->SpringConfig.ColliderGroups.Num(),
+                ResolvedJ, ResolvedC, ResolvedCenters);
+
+            if (bIsNewSpring)
+            {
+                FAssetRegistryModule::AssetCreated(SpringDataAsset);
+            }
         }
 
         SpringDataAsset->MarkPackageDirty();
         SpringPackage->SetDirtyFlag(true);
+
+        // Save the package to disk to make asset immediately available
+        {
+            const FString PackageFilename = FPackageName::LongPackageNameToFilename(SpringPackage->GetName(), FPackageName::GetAssetPackageExtension());
+            FSavePackageArgs SaveArgs;
+            SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+            SaveArgs.SaveFlags = SAVE_NoError;
+            UPackage::SavePackage(SpringPackage, SpringDataAsset, *PackageFilename, SaveArgs);
+        }
     }
 
     // Phase 3: Generate and assign Post-Process Anim Blueprint
@@ -186,6 +226,20 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
                 if (bWantsAssign && SkelMesh)
                 {
                     AssignPostProcessABPToMesh(SkelMesh, DuplicatedABP);
+                }
+
+                // Save duplicated ABP package too for consistency
+                if (UObject* DuplicatedOuter = DuplicatedABP->GetOutermost())
+                {
+                    UPackage* ABPPackage = Cast<UPackage>(DuplicatedOuter);
+                    if (ABPPackage)
+                    {
+                        const FString ABPPackageFilename = FPackageName::LongPackageNameToFilename(ABPPackage->GetName(), FPackageName::GetAssetPackageExtension());
+                        FSavePackageArgs SaveArgs;
+                        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+                        SaveArgs.SaveFlags = SAVE_NoError;
+                        UPackage::SavePackage(ABPPackage, nullptr, *ABPPackageFilename, SaveArgs);
+                    }
                 }
             }
         }
