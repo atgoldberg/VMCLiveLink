@@ -6,6 +6,7 @@
 #include "Engine/EngineTypes.h"
 #include "Animation/AnimInstance.h"
 #include "UObject/SoftObjectPtr.h"
+#include "Components/SkeletalMeshComponent.h"
 
 #define LOCTEXT_NAMESPACE "AnimNode_VRMSpringBone"
 
