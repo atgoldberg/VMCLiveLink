@@ -12,7 +12,8 @@ class VRMINTERCHANGE_API UVRMSpringBoneData : public UDataAsset
 {
     GENERATED_BODY()
 public:
-    UPROPERTY(EditAnywhere, Category="Spring Bones")
+    // Show inner struct fields directly so users can inspect arrays like Colliders/Joints/Springs
+    UPROPERTY(EditAnywhere, Category="Spring Bones", meta=(ShowOnlyInnerProperties))
     FVRMSpringConfig SpringConfig;
 
     UPROPERTY(VisibleAnywhere, Category="Spring Bones")

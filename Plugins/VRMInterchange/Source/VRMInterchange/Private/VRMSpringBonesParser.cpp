@@ -72,6 +72,56 @@ namespace
         return FVector((float)GetF((*Arr)[0]), (float)GetF((*Arr)[1]), (float)GetF((*Arr)[2]));
     }
 
+    // Helper: Some exporters wrap shapes as { "sphere": {..} } or { "capsule": {..} }
+    // Others use { "shape": { "sphere": {..} } } or { "shape": { "capsule": {..} } }
+    static void ParseOneShapeObject(const TSharedPtr<FJsonObject>& ShapeEntry,
+                                    TArray<FVRMSpringColliderSphere>& OutSpheres,
+                                    TArray<FVRMSpringColliderCapsule>& OutCapsules)
+    {
+        if (!ShapeEntry.IsValid()) return;
+
+        auto ParseFromContainer = [&OutSpheres, &OutCapsules](const TSharedPtr<FJsonObject>& Container)
+        {
+            if (!Container.IsValid()) return;
+            const TSharedPtr<FJsonObject>* Sphere = nullptr;
+            if (Container->TryGetObjectField(TEXT("sphere"), Sphere) && Sphere && Sphere->IsValid())
+            {
+                FVRMSpringColliderSphere S; S.Offset = ReadVec3(*Sphere, TEXT("offset")); (*Sphere)->TryGetNumberField(TEXT("radius"), S.Radius); OutSpheres.Add(S);
+            }
+            const TSharedPtr<FJsonObject>* Capsule = nullptr;
+            if (Container->TryGetObjectField(TEXT("capsule"), Capsule) && Capsule && Capsule->IsValid())
+            {
+                FVRMSpringColliderCapsule C; C.Offset = ReadVec3(*Capsule, TEXT("offset")); C.TailOffset = ReadVec3(*Capsule, TEXT("tail")); (*Capsule)->TryGetNumberField(TEXT("radius"), C.Radius); OutCapsules.Add(C);
+            }
+        };
+
+        // Direct form
+        ParseFromContainer(ShapeEntry);
+
+        // Nested under "shape"
+        const TSharedPtr<FJsonObject>* Wrapped = nullptr;
+        if (ShapeEntry->TryGetObjectField(TEXT("shape"), Wrapped) && Wrapped && Wrapped->IsValid())
+        {
+            ParseFromContainer(*Wrapped);
+        }
+
+        // Some previews of the spec used { "type":"sphere", ... }
+        FString Type;
+        if (ShapeEntry->TryGetStringField(TEXT("type"), Type))
+        {
+            Type.TrimStartAndEndInline();
+            Type.ToLowerInline();
+            if (Type == TEXT("sphere"))
+            {
+                FVRMSpringColliderSphere S; S.Offset = ReadVec3(ShapeEntry, TEXT("offset")); ShapeEntry->TryGetNumberField(TEXT("radius"), S.Radius); OutSpheres.Add(S);
+            }
+            else if (Type == TEXT("capsule"))
+            {
+                FVRMSpringColliderCapsule C; C.Offset = ReadVec3(ShapeEntry, TEXT("offset")); C.TailOffset = ReadVec3(ShapeEntry, TEXT("tail")); ShapeEntry->TryGetNumberField(TEXT("radius"), C.Radius); OutCapsules.Add(C);
+            }
+        }
+    }
+
     // Helper: field can be either a number node index or an object { "node": <index> }
     static bool TryGetNodeIndexFlexible(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Field, int32& OutIndex)
     {
@@ -87,6 +137,104 @@ namespace
             return (*Inner)->TryGetNumberField(TEXT("node"), OutIndex);
         }
         return false;
+    }
+
+    // Build a map from glTF node index -> collider shapes defined by the optional VRMC_node_collider extension.
+    // Some exporters store collider shapes on nodes rather than in VRMC_springBone.colliders.
+    static void BuildNodeColliderShapeMap(const TSharedPtr<FJsonObject>& Root,
+        TMap<int32, TArray<FVRMSpringColliderSphere>>& OutSpheres,
+        TMap<int32, TArray<FVRMSpringColliderCapsule>>& OutCapsules)
+    {
+        OutSpheres.Reset();
+        OutCapsules.Reset();
+
+        if (!Root.IsValid())
+        {
+            return;
+        }
+
+        auto ParseShapesFromObj = [](const TSharedPtr<FJsonObject>& ShapesOwner,
+                                     TArray<FVRMSpringColliderSphere>& Spheres,
+                                     TArray<FVRMSpringColliderCapsule>& Capsules)
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
+            if (ShapesOwner.IsValid() && ShapesOwner->TryGetArrayField(TEXT("shapes"), Shapes) && Shapes)
+            {
+                for (const TSharedPtr<FJsonValue>& SV : *Shapes)
+                {
+                    const TSharedPtr<FJsonObject>* SObj = nullptr;
+                    if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
+                    ParseOneShapeObject(*SObj, Spheres, Capsules);
+                }
+            }
+        };
+
+        // 1) Root-level extension: extensions.VRMC_node_collider.colliders[]
+        const TSharedPtr<FJsonObject>* Exts = nullptr;
+        if (Root->TryGetObjectField(TEXT("extensions"), Exts) && Exts && Exts->IsValid())
+        {
+            const TSharedPtr<FJsonObject>* NodeCol = nullptr;
+            if ((*Exts)->TryGetObjectField(TEXT("VRMC_node_collider"), NodeCol) && NodeCol && NodeCol->IsValid())
+            {
+                const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
+                if ((*NodeCol)->TryGetArrayField(TEXT("colliders"), Colliders) && Colliders)
+                {
+                    for (const TSharedPtr<FJsonValue>& CV : *Colliders)
+                    {
+                        const TSharedPtr<FJsonObject>* CObj = nullptr;
+                        if (!CV.IsValid() || !CV->TryGetObject(CObj) || !CObj || !CObj->IsValid()) continue;
+                        int32 NodeIndex = INDEX_NONE; (*CObj)->TryGetNumberField(TEXT("node"), NodeIndex);
+                        if (NodeIndex == INDEX_NONE) continue;
+                        TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIndex);
+                        TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIndex);
+                        ParseShapesFromObj(*CObj, SArr, CArr);
+                    }
+                }
+            }
+        }
+
+        // 2) Per-node extension: nodes[i].extensions.VRMC_node_collider.(colliders[]|collider)
+        const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+        if (Root->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
+        {
+            for (int32 NodeIdx = 0; NodeIdx < Nodes->Num(); ++NodeIdx)
+            {
+                const TSharedPtr<FJsonValue>& NV = (*Nodes)[NodeIdx];
+                const TSharedPtr<FJsonObject>* NObj = nullptr;
+                if (!NV.IsValid() || !NV->TryGetObject(NObj) || !NObj || !NObj->IsValid()) continue;
+
+                const TSharedPtr<FJsonObject>* NExts = nullptr;
+                if (!(*NObj)->TryGetObjectField(TEXT("extensions"), NExts) || !NExts || !NExts->IsValid()) continue;
+
+                const TSharedPtr<FJsonObject>* NodeCol = nullptr;
+                if (!(*NExts)->TryGetObjectField(TEXT("VRMC_node_collider"), NodeCol) || !NodeCol || !NodeCol->IsValid()) continue;
+
+                // Prefer array form
+                const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
+                if ((*NodeCol)->TryGetArrayField(TEXT("colliders"), Colliders) && Colliders)
+                {
+                    for (const TSharedPtr<FJsonValue>& CV : *Colliders)
+                    {
+                        const TSharedPtr<FJsonObject>* CObj = nullptr;
+                        if (!CV.IsValid() || !CV->TryGetObject(CObj) || !CObj || !CObj->IsValid()) continue;
+                        TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIdx);
+                        TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIdx);
+                        ParseShapesFromObj(*CObj, SArr, CArr);
+                    }
+                }
+                else
+                {
+                    // Some exporters store a single object under 'collider' key
+                    const TSharedPtr<FJsonObject>* Single = nullptr;
+                    if ((*NodeCol)->TryGetObjectField(TEXT("collider"), Single) && Single && Single->IsValid())
+                    {
+                        TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIdx);
+                        TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIdx);
+                        ParseShapesFromObj(*Single, SArr, CArr);
+                    }
+                }
+            }
+        }
     }
 
     // VRM 1.0
@@ -107,6 +255,11 @@ namespace
         }
 
         Out.Spec = EVRMSpringSpec::VRM1;
+
+        // Fallback map for shapes that may live under VRMC_node_collider
+        TMap<int32, TArray<FVRMSpringColliderSphere>> NodeSpheres;
+        TMap<int32, TArray<FVRMSpringColliderCapsule>> NodeCapsules;
+        BuildNodeColliderShapeMap(Root, NodeSpheres, NodeCapsules);
 
         // colliders
         const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
@@ -130,30 +283,80 @@ namespace
                         const TSharedPtr<FJsonObject>* SObj = nullptr;
                         if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
 
-                        // sphere
-                        const TSharedPtr<FJsonObject>* Sphere = nullptr;
-                        if ((*SObj)->TryGetObjectField(TEXT("sphere"), Sphere) && Sphere && Sphere->IsValid())
-                        {
-                            FVRMSpringColliderSphere S;
-                            S.Offset = ReadVec3(*Sphere, TEXT("offset"));
-                            (*Sphere)->TryGetNumberField(TEXT("radius"), S.Radius);
-                            Collider.Spheres.Add(S);
-                        }
+                        // Accept multiple schema variants
+                        ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules);
+                    }
+                }
 
-                        // capsule
-                        const TSharedPtr<FJsonObject>* Capsule = nullptr;
-                        if ((*SObj)->TryGetObjectField(TEXT("capsule"), Capsule) && Capsule && Capsule->IsValid())
+                // NEW: support single 'shape' object or array when 'shapes' is not present
+                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0)
+                {
+                    // Single object
+                    const TSharedPtr<FJsonObject>* SingleShapeObj = nullptr;
+                    if ((*CObj)->TryGetObjectField(TEXT("shape"), SingleShapeObj) && SingleShapeObj && SingleShapeObj->IsValid())
+                    {
+                        ParseOneShapeObject(*SingleShapeObj, Collider.Spheres, Collider.Capsules);
+                    }
+                    else
+                    {
+                        // Some tools may emit an array under 'shape'
+                        const TArray<TSharedPtr<FJsonValue>>* ShapeArray = nullptr;
+                        if ((*CObj)->TryGetArrayField(TEXT("shape"), ShapeArray) && ShapeArray)
                         {
-                            FVRMSpringColliderCapsule C;
-                            C.Offset = ReadVec3(*Capsule, TEXT("offset"));
-                            C.TailOffset = ReadVec3(*Capsule, TEXT("tail"));
-                            (*Capsule)->TryGetNumberField(TEXT("radius"), C.Radius);
-                            Collider.Capsules.Add(C);
+                            for (const TSharedPtr<FJsonValue>& SV : *ShapeArray)
+                            {
+                                const TSharedPtr<FJsonObject>* SObj = nullptr;
+                                if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
+                                ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules);
+                            }
                         }
                     }
                 }
 
+                // If shapes were not found in VRMC_springBone, try VRMC_node_collider maps
+                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0 && Collider.NodeIndex != INDEX_NONE)
+                {
+                    if (const TArray<FVRMSpringColliderSphere>* FoundS = NodeSpheres.Find(Collider.NodeIndex))
+                    {
+                        Collider.Spheres.Append(*FoundS);
+                    }
+                    if (const TArray<FVRMSpringColliderCapsule>* FoundC = NodeCapsules.Find(Collider.NodeIndex))
+                    {
+                        Collider.Capsules.Append(*FoundC);
+                    }
+                }
+
                 Out.Colliders.Add(MoveTemp(Collider));
+            }
+        }
+
+        // NEW: Some exporters only specify shapes under VRMC_node_collider and do not list any
+        // colliders in VRMC_springBone. In that case, synthesize collider entries for those nodes
+        // so downstream code has proper shapes.
+        if (Out.Colliders.Num() == 0 && (NodeSpheres.Num() > 0 || NodeCapsules.Num() > 0))
+        {
+            TSet<int32> NodesWithAnyShape;
+            for (const auto& Pair : NodeSpheres) { NodesWithAnyShape.Add(Pair.Key); }
+            for (const auto& Pair : NodeCapsules) { NodesWithAnyShape.Add(Pair.Key); }
+
+            for (int32 NodeIdx : NodesWithAnyShape)
+            {
+                FVRMSpringCollider Synth;
+                Synth.NodeIndex = NodeIdx;
+                if (const TArray<FVRMSpringColliderSphere>* FoundS = NodeSpheres.Find(NodeIdx))
+                {
+                    Synth.Spheres.Append(*FoundS);
+                }
+                if (const TArray<FVRMSpringColliderCapsule>* FoundC = NodeCapsules.Find(NodeIdx))
+                {
+                    Synth.Capsules.Append(*FoundC);
+                }
+                if (Synth.Spheres.Num() > 0 || Synth.Capsules.Num() > 0)
+                {
+                    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Synthesized collider for node %d from VRMC_node_collider (Spheres=%d, Capsules=%d)"),
+                        NodeIdx, Synth.Spheres.Num(), Synth.Capsules.Num());
+                    Out.Colliders.Add(MoveTemp(Synth));
+                }
             }
         }
 
@@ -300,6 +503,9 @@ namespace
                 int32 NodeIndex = INDEX_NONE;
                 (*GObj)->TryGetNumberField(TEXT("node"), NodeIndex);
 
+                FVRMSpringCollider GroupColliderTemplate; // node index propagated to all colliders in the group
+                GroupColliderTemplate.NodeIndex = NodeIndex;
+
                 FVRMSpringColliderGroup Group;
                 GroupIndexToFirstCollider.Add(ColliderBase);
 
@@ -311,8 +517,7 @@ namespace
                         const TSharedPtr<FJsonObject>* CObj = nullptr;
                         if (!CV.IsValid() || !CV->TryGetObject(CObj) || !CObj || !CObj->IsValid()) continue;
 
-                        FVRMSpringCollider Collider;
-                        Collider.NodeIndex = NodeIndex;
+                        FVRMSpringCollider Collider = GroupColliderTemplate; // copy node index
 
                         FVRMSpringColliderSphere S;
                         S.Offset = ReadVec3(*CObj, TEXT("offset"));

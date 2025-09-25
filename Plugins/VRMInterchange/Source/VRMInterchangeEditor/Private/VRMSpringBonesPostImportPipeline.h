@@ -35,6 +35,14 @@ public:
     UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Assign Post-Process AnimBP", ToolTip="Assign the duplicated Post-Process AnimBP to the imported SkeletalMesh."))
     bool bAssignPostProcessABP = false;
 
+    // New: control whether generated ABP should overwrite existing with same name
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Overwrite Post-Process AnimBP", ToolTip="If true, overwrite existing generated Post-Process AnimBlueprints. If false, create a unique name."))
+    bool bOverwriteExistingPostProcessABP = false;
+
+    // New: control whether to reuse existing ABP on re-import
+    UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Reuse Post-Process ABP on Re-Import", ToolTip="If true, attempt to reuse an existing Post-Process AnimBP when re-importing. If false, prompt to overwrite or create new."))
+    bool bReusePostProcessABPOnReimport = true;
+
     UPROPERTY(EditAnywhere, Category = "VRM Spring", meta=(DisplayName="Animation Sub-Folder"))
     FString AnimationSubFolder = TEXT("Animation");
 
@@ -60,7 +68,7 @@ private:
 
     // Phase 3 helpers
     bool FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const;
-    UObject* DuplicateTemplateAnimBlueprint(const FString& TargetPackagePath, const FString& BaseName, USkeleton* TargetSkeleton) const;
+    UObject* DuplicateTemplateAnimBlueprint(const FString& TargetPackagePath, const FString& BaseName, USkeleton* TargetSkeleton, bool bOverwriteExistingABP) const;
     bool SetSpringConfigOnAnimBlueprint(UObject* AnimBlueprintObj, UVRMSpringBoneData* SpringData) const;
     bool AssignPostProcessABPToMesh(USkeletalMesh* SkelMesh, UObject* AnimBlueprintObj) const;
 

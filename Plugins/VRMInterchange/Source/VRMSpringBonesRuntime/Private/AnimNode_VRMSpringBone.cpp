@@ -20,7 +20,7 @@ static TAutoConsoleVariable<int32> CVarVRMSpringDebug(
 static TAutoConsoleVariable<int32> CVarVRMSpringDraw(
     TEXT("vrm.Spring.Draw"),
     0,
-    TEXT("Draw spring chains in-world from the anim node (0=off,1=positions,2=positions+animated)."),
+    TEXT("Draw spring chains in-world from the anim node (0=off,1=positions,2=positions+animated+colliders)."),
     ECVF_Default);
 
 static FVector ResolveSpringGravity(const FVRMSpring& Spring, const FVector& DefaultGravity)
@@ -63,6 +63,38 @@ static UVRMSpringBoneData* TryAdoptSpringConfigFromAnimInstance(FAnimInstancePro
         }
     }
     return nullptr;
+}
+
+// Update helper: recompute rest lengths/directions from the current component-space animated transforms.
+// This ensures the physical rest lengths respect any runtime or import-time bone scaling / mirroring.
+static void UpdateChainRestFromCSPose(FAnimNode_VRMSpringBone::FChainInfo& Chain, FCSPose<FCompactPose>& CSPose)
+{
+    const int32 Count = Chain.CompactIndices.Num();
+    Chain.SegmentRestLengths.SetNum(Count);
+    Chain.RestDirections.SetNum(Count);
+    Chain.RestComponentPositions.SetNum(Count);
+
+    if (Count == 0) return;
+
+    // Root
+    const FCompactPoseBoneIndex RootIdx = Chain.CompactIndices[0];
+    const FVector RootPos = CSPose.GetComponentSpaceTransform(RootIdx).GetLocation();
+    Chain.SegmentRestLengths[0] = 0.f;
+    Chain.RestDirections[0] = FVector::ZeroVector;
+    Chain.RestComponentPositions[0] = RootPos;
+
+    for (int32 i = 1; i < Count; ++i)
+    {
+        const FCompactPoseBoneIndex PIdx = Chain.CompactIndices[i - 1];
+        const FCompactPoseBoneIndex CIdx = Chain.CompactIndices[i];
+        const FVector ParentPos = CSPose.GetComponentSpaceTransform(PIdx).GetLocation();
+        const FVector ChildPos = CSPose.GetComponentSpaceTransform(CIdx).GetLocation();
+        const FVector Dir = (ChildPos - ParentPos);
+        const float Len = Dir.Size();
+        Chain.SegmentRestLengths[i] = Len;
+        Chain.RestDirections[i] = (Len > KINDA_SMALL_NUMBER) ? (Dir / Len) : FVector::ZeroVector;
+        Chain.RestComponentPositions[i] = ChildPos;
+    }
 }
 
 // Static test helper
@@ -113,6 +145,59 @@ void FAnimNode_VRMSpringBone::ComputeRestFromPositions(FChainInfo& Chain)
         FVector Dir = (ChildPos - ParentPos); const float Len = Dir.Size();
         Chain.SegmentRestLengths[i] = Len; Chain.RestDirections[i] = (Len > KINDA_SMALL_NUMBER)? (Dir/Len) : FVector::ZeroVector;
     }
+}
+
+// Math helpers
+FVector FAnimNode_VRMSpringBone::ProjectPointOnSegment(const FVector& A, const FVector& B, const FVector& P)
+{
+    const FVector AB = B - A; const float AB2 = AB.SizeSquared(); if (AB2 <= KINDA_SMALL_NUMBER) return A;
+    const float T = FMath::Clamp(FVector::DotProduct(P - A, AB) / AB2, 0.f, 1.f);
+    return A + AB * T;
+}
+
+static void ResolveSphereCollision(FVector& JointPos, FVector& PrevPos, const FVector& ColliderPos, float ColliderRadius, float JointRadius, float Friction, float Restitution)
+{
+    const float MinDist = ColliderRadius + JointRadius;
+    FVector Delta = JointPos - ColliderPos; float Dist = Delta.Size();
+    if (Dist <= KINDA_SMALL_NUMBER)
+    {
+        // Push out along arbitrary axis
+        Delta = FVector(MinDist, 0.f, 0.f);
+        JointPos = ColliderPos + Delta;
+        PrevPos = JointPos; // clear velocity
+        return;
+    }
+    if (Dist < MinDist)
+    {
+        const FVector N = Delta / Dist;
+        const FVector Target = ColliderPos + N * MinDist;
+
+        // Compute velocity before correction
+        FVector Vel = JointPos - PrevPos;
+
+        // Decompose into normal and tangential components
+        const float Vn = FVector::DotProduct(Vel, N);
+        const FVector VnVec = N * Vn;
+        const FVector VtVec = Vel - VnVec;
+
+        // Apply restitution on normal, friction on tangent
+        FVector NewVel = (-Restitution * VnVec) + ((1.f - Friction) * VtVec);
+
+        JointPos = Target;
+        PrevPos = JointPos - NewVel;
+    }
+}
+
+// Capsule collision: treat as infinite cylinder capped by spheres, project onto segment and resolve like sphere at closest point
+static void ResolveCapsuleCollision(FVector& JointPos, FVector& PrevPos, const FVector& A, const FVector& B, float CapsuleRadius, float JointRadius, float Friction, float Restitution)
+{
+    const FVector Closest = FAnimNode_VRMSpringBone::ProjectPointOnSegment(A, B, JointPos);
+    ResolveSphereCollision(JointPos, PrevPos, Closest, CapsuleRadius, JointRadius, Friction, Restitution);
+}
+
+void FAnimNode_VRMSpringBone::ResolveCapsuleCollisionTestHook(FVector& JointPos, FVector& PrevPos, const FVector& A, const FVector& B, float CapsuleRadius, float JointRadius, float Friction, float Restitution)
+{
+    ResolveCapsuleCollision(JointPos, PrevPos, A, B, CapsuleRadius, JointRadius, Friction, Restitution);
 }
 
 void FAnimNode_VRMSpringBone::Initialize_AnyThread(const FAnimationInitializeContext& Context)
@@ -246,15 +331,106 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
 
     FCSPose<FCompactPose> CSPose; CSPose.InitPose(Output.Pose);
 
+    // Precompute collider world/component-space positions for VRM colliders
+    TArray<FVector> ColliderSpherePositionsCS;
+    TArray<float>   ColliderSphereRadii;
+    struct FCapsuleTmp { FVector A; FVector B; float R; };
+    TArray<FCapsuleTmp> ColliderCapsulesCS;
+    ColliderSpherePositionsCS.Reserve(64);
+    ColliderSphereRadii.Reserve(64);
+    ColliderCapsulesCS.Reserve(32);
+
+    USkeletalMeshComponent* SkelComp = Output.AnimInstanceProxy ? Output.AnimInstanceProxy->GetSkelMeshComponent() : nullptr;
+    // Note: VRM data expresses colliders in meters; apply the same scale to offsets and radii.
+    const float UnitScale = (bVRMRadiiInMeters ? VRMToCentimetersScale : 1.f);
+
+    // Prefilter by ColliderGroups per-spring: collect referenced indices to reduce checks
+    TSet<int32> UsedColliderIndices;
+
+    if (SpringConfig && SpringConfig->SpringConfig.IsValid())
+    {
+        const FVRMSpringConfig& Config = SpringConfig->SpringConfig;
+
+        // Accumulate groups used by any existing chains' source spring
+        for (const FChainInfo& Chain : Chains)
+        {
+            const int32 SpringIdx = Chain.SourceSpringIndex;
+            if (Config.Springs.IsValidIndex(SpringIdx))
+            {
+                for (int32 GIdx : Config.Springs[SpringIdx].ColliderGroupIndices)
+                {
+                    if (Config.ColliderGroups.IsValidIndex(GIdx))
+                    {
+                        for (int32 CIdx : Config.ColliderGroups[GIdx].ColliderIndices)
+                        {
+                            UsedColliderIndices.Add(CIdx);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build collider shapes in component space (spheres + capsules)
+        for (int32 CIdx = 0; CIdx < Config.Colliders.Num(); ++CIdx)
+        {
+            if (UsedColliderIndices.Num() > 0 && !UsedColliderIndices.Contains(CIdx))
+            {
+                continue; // filtered out
+            }
+
+            const FVRMSpringCollider& C = Config.Colliders[CIdx];
+
+            FTransform ColliderBoneCS = FTransform::Identity;
+            bool bHaveBone = false;
+            if (!C.BoneName.IsNone() && SkelComp)
+            {
+                const int32 BoneIndex = SkelComp->GetBoneIndex(C.BoneName);
+                if (BoneIndex != INDEX_NONE)
+                {
+                    // Get bone transform in world space then convert to component space to ensure correct space for simulation/drawing
+                    const FTransform BoneWS = SkelComp->GetBoneTransform(BoneIndex);
+                    const FTransform C2W = SkelComp->GetComponentToWorld();
+                    ColliderBoneCS = BoneWS.GetRelativeTransform(C2W);
+                    bHaveBone = true;
+                }
+            }
+
+            // Spheres
+            for (const FVRMSpringColliderSphere& S : C.Spheres)
+            {
+                const FVector Local = S.Offset * UnitScale;
+                FVector SphereCSPos = bHaveBone ? ColliderBoneCS.TransformPosition(Local) : Local;
+                ColliderSpherePositionsCS.Add(SphereCSPos);
+                ColliderSphereRadii.Add(S.Radius * UnitScale);
+            }
+
+            // Capsules
+            for (const FVRMSpringColliderCapsule& Cap : C.Capsules)
+            {
+                const FVector ALocal = Cap.Offset * UnitScale;
+                const FVector BLocal = Cap.TailOffset * UnitScale;
+                const FVector A = bHaveBone ? ColliderBoneCS.TransformPosition(ALocal) : ALocal;
+                const FVector B = bHaveBone ? ColliderBoneCS.TransformPosition(BLocal) : BLocal;
+                FCapsuleTmp Tmp; Tmp.A = A; Tmp.B = B; Tmp.R = Cap.Radius * UnitScale;
+                ColliderCapsulesCS.Add(Tmp);
+            }
+        }
+    }
+
     for (FChainInfo& Chain : Chains)
     {
         const int32 Count = Chain.CompactIndices.Num(); if (Count == 0) continue;
 
         if (!Chain.bInitializedPositions || bPendingTeleportReset)
         {
+            // Initialize simulated positions from component-space animated transforms. Also recompute rest lengths/directions
             Chain.CurrPositions.SetNum(Count); Chain.PrevPositions.SetNum(Count);
             for (int32 i=0;i<Count;++i)
             { Chain.CurrPositions[i] = CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i]).GetLocation(); Chain.PrevPositions[i] = Chain.CurrPositions[i]; }
+
+            // Recompute rest information based on current animated (component-space) transforms.
+            UpdateChainRestFromCSPose(Chain, CSPose);
+
             Chain.bInitializedPositions = true; bPendingTeleportReset = false; if (DebugLevel >= 2) { UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring] Initialize positions for chain; Joints=%d"), Count); } continue;
         }
 
@@ -310,13 +486,30 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
                 { const FVector Fallback = Chain.RestDirections.IsValidIndex(i) ? Chain.RestDirections[i] * RestLen : FVector(RestLen,0,0); ChildPos = ParentPos + Fallback; continue; }
                 const float Diff = (CurLen - RestLen) / CurLen; ChildPos -= Delta * Diff;
             }
+
+            // Collisions: sphere + capsule
+            if (ColliderSpherePositionsCS.Num() > 0 || ColliderCapsulesCS.Num() > 0)
+            {
+                for (int32 j=1;j<Count;++j)
+                {
+                    const float JointRadius = (Chain.JointHitRadii.IsValidIndex(j) ? Chain.JointHitRadii[j] : Chain.HitRadius) * UnitScale;
+
+                    for (int32 c=0;c<ColliderSpherePositionsCS.Num();++c)
+                    {
+                        ResolveSphereCollision(Chain.CurrPositions[j], Chain.PrevPositions[j], ColliderSpherePositionsCS[c], ColliderSphereRadii[c], JointRadius, CollisionFriction, CollisionRestitution);
+                    }
+                    for (const FCapsuleTmp& Cap : ColliderCapsulesCS)
+                    {
+                        ResolveCapsuleCollision(Chain.CurrPositions[j], Chain.PrevPositions[j], Cap.A, Cap.B, Cap.R, JointRadius, CollisionFriction, CollisionRestitution);
+                    }
+                }
+            }
         }
 
         // Optional debug draw
         if (DrawLevel > 0)
         {
             const FColor ChainColor = FColor::Cyan;
-            USkeletalMeshComponent* SkelComp = Output.AnimInstanceProxy ? Output.AnimInstanceProxy->GetSkelMeshComponent() : nullptr;
             const FTransform C2W = SkelComp ? SkelComp->GetComponentToWorld() : FTransform::Identity;
             auto ToWorld = [&](const FVector& P) -> FVector { return C2W.TransformPosition(P); };
 
@@ -324,13 +517,35 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
             {
                 const FVector ParentSimPosWS = ToWorld(Chain.CurrPositions[i-1]);
                 const FVector ChildSimPosWS  = ToWorld(Chain.CurrPositions[i]);
-                // FAnimInstanceProxy signature: (Start, End, Color, bPersistent, LifeTime, Thickness, DepthPriority)
                 Output.AnimInstanceProxy->AnimDrawDebugLine(ParentSimPosWS, ChildSimPosWS, ChainColor, false, 0.f, 2.f, SDPG_World);
                 if (DrawLevel > 1)
                 {
                     const FVector ParentAnimWS = ToWorld(CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i-1]).GetLocation());
                     const FVector ChildAnimWS  = ToWorld(CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i]).GetLocation());
                     Output.AnimInstanceProxy->AnimDrawDebugLine(ParentAnimWS, ChildAnimWS, FColor::Orange, false, 0.f, 1.f, SDPG_World);
+                }
+            }
+            // Colliders: only at DrawLevel >= 2
+            if (DrawLevel > 1)
+            {
+                const FColor ColColor = FColor::Red;
+                if (USkeletalMeshComponent* C = SkelComp)
+                {
+                    for (int32 c=0;c<ColliderSpherePositionsCS.Num();++c)
+                    {
+                        const FVector PosWS = C->GetComponentToWorld().TransformPosition(ColliderSpherePositionsCS[c]);
+                        Output.AnimInstanceProxy->AnimDrawDebugSphere(PosWS, ColliderSphereRadii[c], 8, ColColor, false, 0.f, SDPG_World);
+                    }
+                    for (const FCapsuleTmp& Cap : ColliderCapsulesCS)
+                    {
+                        const FVector AWS = C->GetComponentToWorld().TransformPosition(Cap.A);
+                        const FVector BWS = C->GetComponentToWorld().TransformPosition(Cap.B);
+                        // Axis line
+                        Output.AnimInstanceProxy->AnimDrawDebugLine(AWS, BWS, ColColor, false, 0.f, 1.f, SDPG_World);
+                        // End spheres to better visualize the capsule volume
+                        Output.AnimInstanceProxy->AnimDrawDebugSphere(AWS, Cap.R, 8, ColColor, false, 0.f, SDPG_World);
+                        Output.AnimInstanceProxy->AnimDrawDebugSphere(BWS, Cap.R, 8, ColColor, false, 0.f, SDPG_World);
+                    }
                 }
             }
         }
@@ -342,9 +557,27 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
             const FVector ParentSimPos = Chain.CurrPositions[i-1]; const FVector ChildSimPos  = Chain.CurrPositions[i];
             const FVector SimDir = (ChildSimPos - ParentSimPos).GetSafeNormal(); if (SimDir.IsNearlyZero()) continue;
             const FVector RefDir = Chain.RestDirections.IsValidIndex(i)? Chain.RestDirections[i] : SimDir; if (RefDir.IsNearlyZero()) continue;
-            const FQuat DeltaRot = FQuat::FindBetweenNormals(RefDir, SimDir);
-            const FCompactPoseBoneIndex ChildIdx = Chain.CompactIndices[i]; FTransform LocalBone = Pose[ChildIdx];
-            LocalBone.SetRotation( (DeltaRot * LocalBone.GetRotation()).GetNormalized() ); Pose[ChildIdx] = LocalBone;
+
+            // Compute a rotation in component-space that aligns the rest direction to simulated direction.
+            const FQuat DeltaRotCS = FQuat::FindBetweenNormals(RefDir, SimDir);
+
+            const FCompactPoseBoneIndex ParentIdx = Chain.CompactIndices[i-1];
+            const FCompactPoseBoneIndex ChildIdx = Chain.CompactIndices[i];
+
+            // Get current component-space transforms
+            const FTransform ParentCSTrans = CSPose.GetComponentSpaceTransform(ParentIdx);
+            const FTransform ChildCSTrans = CSPose.GetComponentSpaceTransform(ChildIdx);
+
+            // Apply delta in component space to the child's component rotation
+            const FQuat NewChildCSRot = (DeltaRotCS * ChildCSTrans.GetRotation()).GetNormalized();
+            FTransform NewChildCSTrans = ChildCSTrans; NewChildCSTrans.SetRotation(NewChildCSRot);
+
+            // Convert back to local (relative to parent) taking scale/rotation into account
+            FTransform NewLocal = NewChildCSTrans.GetRelativeTransform(ParentCSTrans);
+
+            FTransform LocalBone = Pose[ChildIdx];
+            LocalBone.SetRotation(NewLocal.GetRotation().GetNormalized());
+            Pose[ChildIdx] = LocalBone;
         }
 
         if (DebugLevel >= 2)
@@ -389,7 +622,8 @@ void FAnimNode_VRMSpringBone::BuildChains(const FBoneContainer& BoneContainer)
     {
         if (DebugLevel >= 1)
         {
-            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] BuildChains: SpringConfig is null; cannot build."));
+            UE_LOG(LogVRMSpring, Warning,
+                TEXT("[VRMSpring] BuildChains: SpringConfig is null; cannot build."));
         }
         return;
     }
@@ -397,7 +631,8 @@ void FAnimNode_VRMSpringBone::BuildChains(const FBoneContainer& BoneContainer)
     {
         if (DebugLevel >= 1)
         {
-            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] BuildChains: SpringConfig->SpringConfig is invalid; cannot build."));
+            UE_LOG(LogVRMSpring, Warning,
+                TEXT("[VRMSpring] BuildChains: SpringConfig->SpringConfig is invalid; cannot build."));
         }
         return;
     }
@@ -417,12 +652,17 @@ void FAnimNode_VRMSpringBone::BuildChains(const FBoneContainer& BoneContainer)
         Chain.CenterCompactIndex = FCompactPoseBoneIndex(INDEX_NONE);
         Chain.CenterPullStrength = GlobalCenterPullStrength;
 
-        for (int32 JointIdx : Spring.JointIndices)
+        // Initialize JointHitRadii to match joint count
+        Chain.JointHitRadii.Reset();
+        Chain.JointHitRadii.AddDefaulted(Spring.JointIndices.Num());
+
+        for (int32 idx = 0; idx < Spring.JointIndices.Num(); ++idx)
         {
+            int32 JointIdx = Spring.JointIndices[idx];
             if (!Config.Joints.IsValidIndex(JointIdx)) { ++Chain.MissingJointCount; continue; }
             const FVRMSpringJoint& J = Config.Joints[JointIdx]; if (J.BoneName.IsNone()) { ++Chain.MissingJointCount; continue; }
             FBoneReference Ref; Ref.BoneName = J.BoneName; Ref.Initialize(BoneContainer);
-            if (Ref.IsValidToEvaluate(BoneContainer)) { Chain.CompactIndices.Add(Ref.GetCompactPoseIndex(BoneContainer)); Chain.BoneRefs.Add(MoveTemp(Ref)); }
+            if (Ref.IsValidToEvaluate(BoneContainer)) { Chain.CompactIndices.Add(Ref.GetCompactPoseIndex(BoneContainer)); Chain.BoneRefs.Add(MoveTemp(Ref)); Chain.JointHitRadii[idx] = J.HitRadius; }
             else { ++Chain.MissingJointCount; }
         }
         if (Chain.CompactIndices.Num() > 0) { Chains.Add(MoveTemp(Chain)); ++AddedChains; }
@@ -475,6 +715,4 @@ void FAnimNode_VRMSpringBone::ComputeReferencePoseRestLengths(const FBoneContain
         }
     }
 }
-
-#undef LOCTEXT_NAMESPACE
 
