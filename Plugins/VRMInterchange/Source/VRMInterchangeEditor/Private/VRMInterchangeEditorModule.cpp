@@ -1,4 +1,5 @@
 // Minimal module entry point for the editor module.
+#include "VRMInterchangeEditorModule.h" // New header
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 #include "VRMSpringBonesPostImportPipeline.h"
@@ -83,33 +84,25 @@ static void HandlePreExit()
 #endif // WITH_EDITOR
 }
 
-class FVRMInterchangeEditorModule : public IModuleInterface
+IMPLEMENT_MODULE(FVRMInterchangeEditorModule, VRMInterchangeEditor)
+
+// Module implementation
+void FVRMInterchangeEditorModule::StartupModule()
 {
-public:
-	virtual void StartupModule() override
-	{
-		UVRMSpringBonesPostImportPipeline::StaticClass();
+	UVRMSpringBonesPostImportPipeline::StaticClass();
 #if WITH_EDITOR
-		AppendVRMSpringBonesPipeline();
-		FCoreDelegates::OnPreExit.AddStatic(&HandlePreExit);
+	AppendVRMSpringBonesPipeline();
+	FCoreDelegates::OnPreExit.AddStatic(&HandlePreExit);
 #endif
-	}
+}
 
-	virtual void ShutdownModule() override
-	{
+void FVRMInterchangeEditorModule::ShutdownModule()
+{
 #if WITH_EDITOR
-		HandlePreExit();
+	HandlePreExit();
 #endif
-	}
+}
 
-public:
-#if WITH_EDITOR
-	static void NotifySpringDataCreated(UVRMSpringBoneData* Asset); // defined below
-	static void NotifySpringDataSaved(UVRMSpringBoneData* Asset);   // defined below
-#endif
-};
-
-// Out-of-class definitions so a linkable symbol exists (pipeline TU only forward-declares the class)
 #if WITH_EDITOR
 void FVRMInterchangeEditorModule::NotifySpringDataCreated(UVRMSpringBoneData* Asset)
 {
@@ -121,5 +114,3 @@ void FVRMInterchangeEditorModule::NotifySpringDataSaved(UVRMSpringBoneData* Asse
 	RegisterSpringDataSaved(Asset);
 }
 #endif
-
-IMPLEMENT_MODULE(FVRMInterchangeEditorModule, VRMInterchangeEditor)

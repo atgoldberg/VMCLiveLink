@@ -1,5 +1,5 @@
 ﻿#include "VRMSpringBonesPostImportPipeline.h"
-#include "VRMSpringBoneData.h"
+#include "VRMSpringBoneData.h" // moved to runtime module
 // Removed direct inclusion of module .cpp; declare module interface stub for static helper
 #if WITH_EDITOR
 class FVRMInterchangeEditorModule { public: static void NotifySpringDataCreated(class UVRMSpringBoneData* Asset); };
@@ -22,7 +22,7 @@ class FVRMInterchangeEditorModule { public: static void NotifySpringDataCreated(
 #include "VRMInterchangeSettings.h"
 #include "VRMDeletedImportManager.h"
 
-// cgltf
+/// cgltf
 #if !defined(VRM_HAS_CGLTF)
 #  if defined(__has_include)
 #    if __has_include("cgltf.h")
