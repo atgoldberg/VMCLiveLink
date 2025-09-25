@@ -17,8 +17,20 @@
       "Type": "Editor",
       "LoadingPhase": "PreDefault",
       "EnabledByDefault": true,
-			"IncludeListPlatforms": [ "Win64" ]
-
+      "IncludeListPlatforms": [ "Win64" ]
+    },
+    {
+      "Name": "VRMSpringBonesRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default",
+      "EnabledByDefault": true
+    },
+    {
+      "Name": "VRMSpringBonesEditor",
+      "Type": "UncookedOnly",
+      "LoadingPhase": "PostDefault",
+      "EnabledByDefault": true,
+      "IncludeListPlatforms": [ "Win64" ]
     }
   ],
   "EnabledByDefault": true,

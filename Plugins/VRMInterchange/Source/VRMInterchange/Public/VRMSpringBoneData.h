@@ -5,18 +5,16 @@
 #include "VRMSpringBonesTypes.h"
 #include "VRMSpringBoneData.generated.h"
 
-// Editor-only data asset that stores parsed spring bone configuration,
-// plus optional provenance information for regeneration/debugging.
+// Runtime-available data asset storing parsed spring bone configuration.
+// Moved from Editor module to allow packaged builds to access spring settings.
 UCLASS(BlueprintType)
-class VRMINTERCHANGEEDITOR_API UVRMSpringBoneData : public UDataAsset
+class VRMINTERCHANGE_API UVRMSpringBoneData : public UDataAsset
 {
     GENERATED_BODY()
 public:
-    // Parsed and normalized spring bone configuration (runtime-shared type)
     UPROPERTY(EditAnywhere, Category="Spring Bones")
     FVRMSpringConfig SpringConfig;
 
-    // Optional source info for staleness checks / diagnostics
     UPROPERTY(VisibleAnywhere, Category="Spring Bones")
     FString SourceHash;
 
