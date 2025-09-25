@@ -109,8 +109,26 @@ struct VRMINTERCHANGE_API FVRMSpringConfig
     // Optional raw JSON copy for diagnostics
     UPROPERTY() FString RawJson;
 
+    // Version-specific metadata for validation and debugging
+    UPROPERTY() FString ParsedVersion; // "VRM0" or "VRM1" 
+    UPROPERTY() TArray<FString> ParseWarnings; // Warnings about missing/default values
+    UPROPERTY() TArray<FString> UnsupportedFeatures; // Features found but not supported
+
     bool IsValid() const
     {
         return Spec != EVRMSpringSpec::None && (Springs.Num() > 0 || ColliderGroups.Num() > 0 || Colliders.Num() > 0 || Joints.Num() > 0);
+    }
+
+    // Get human-readable summary of what was parsed
+    FString GetParsingSummary() const
+    {
+        return FString::Printf(TEXT("%s: %d colliders, %d groups, %d joints, %d springs"),
+            *ParsedVersion, Colliders.Num(), ColliderGroups.Num(), Joints.Num(), Springs.Num());
+    }
+
+    // Check if parsing encountered any issues
+    bool HasParseWarnings() const
+    {
+        return ParseWarnings.Num() > 0 || UnsupportedFeatures.Num() > 0;
     }
 };
