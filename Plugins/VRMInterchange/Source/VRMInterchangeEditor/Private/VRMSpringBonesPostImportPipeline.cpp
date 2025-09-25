@@ -1,9 +1,6 @@
 ﻿#include "VRMSpringBonesPostImportPipeline.h"
 #include "VRMSpringBoneData.h" // moved to runtime module
-// Removed direct inclusion of module .cpp; declare module interface stub for static helper
-#if WITH_EDITOR
-class FVRMInterchangeEditorModule { public: static void NotifySpringDataCreated(class UVRMSpringBoneData* Asset); };
-#endif
+#include "VRMInterchangeEditorModule.h" // for FVRMInterchangeEditorModule static notifications
 #include "InterchangeSourceData.h"
 #include "Nodes/InterchangeBaseNodeContainer.h"
 #include "AssetRegistry/AssetRegistryModule.h"
