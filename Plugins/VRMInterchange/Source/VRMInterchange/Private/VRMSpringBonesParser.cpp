@@ -235,6 +235,7 @@ namespace
 
                             const int32 NewJointIndex = Out.Joints.Add(MoveTemp(J));
                             S.JointIndices.Add(NewJointIndex);
+                            UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Inline joint object parsed and appended as joint index %d (node=%d)"), NewJointIndex, Out.Joints.IsValidIndex(NewJointIndex) ? Out.Joints[NewJointIndex].NodeIndex : INDEX_NONE);
                         }
                         else
                         {
@@ -340,12 +341,25 @@ namespace
                 FVRMSpring Spring;
                 (*BObj)->TryGetStringField(TEXT("comment"), Spring.Name);
                 (*BObj)->TryGetNumberField(TEXT("center"), Spring.CenterNodeIndex);
-                (*BObj)->TryGetNumberField(TEXT("stiffiness"), Spring.Stiffness); // some files use 'stiffiness' (typo)
+
+                // legacy typo 'stiffiness' sometimes appears in 0.x exports
+                bool bUsedLegacyStiffiness = false;
+                if ((*BObj)->TryGetNumberField(TEXT("stiffiness"), Spring.Stiffness))
+                {
+                    bUsedLegacyStiffiness = true;
+                    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM0: detected legacy 'stiffiness' field and mapped to 'stiffness' (value=%.3f)"), Spring.Stiffness);
+                }
+                // preferred 'stiffness'
                 (*BObj)->TryGetNumberField(TEXT("stiffness"), Spring.Stiffness);
                 (*BObj)->TryGetNumberField(TEXT("dragForce"), Spring.Drag);
                 Spring.GravityDir = ReadVec3(*BObj, TEXT("gravityDir"), FVector(0, 0, -1));
                 (*BObj)->TryGetNumberField(TEXT("gravityPower"), Spring.GravityPower);
                 (*BObj)->TryGetNumberField(TEXT("hitRadius"), Spring.HitRadius);
+
+                if (bUsedLegacyStiffiness)
+                {
+                    UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] VRM0: Mapped legacy 'stiffiness' to 'stiffness' for spring '%s'"), *Spring.Name);
+                }
 
                 // bones -> we map to Joints + indices
                 const TArray<TSharedPtr<FJsonValue>>* Bones = nullptr;
@@ -403,6 +417,7 @@ namespace VRM
         if (ParseVRM1(Root, OutConfig, OutError))
         {
             OutConfig.RawJson = Json;
+            UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM1: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num());
             return true;
         }
 
@@ -414,6 +429,7 @@ namespace VRM
             OutConfig = MoveTemp(As0);
             OutConfig.RawJson = Json;
             OutError.Reset();
+            UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM0: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num());
             return true;
         }
 
