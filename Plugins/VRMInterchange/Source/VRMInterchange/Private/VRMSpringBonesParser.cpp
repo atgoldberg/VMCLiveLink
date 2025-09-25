@@ -415,12 +415,24 @@ namespace
                 // center can be a number or an object { node: <index> }
                 TryGetNodeIndexFlexible(*SObj, TEXT("center"), S.CenterNodeIndex);
 
-                // Spring-level parameters are optional in VRM1 (often per-joint), keep parsing if present
-                (*SObj)->TryGetNumberField(TEXT("stiffness"), S.Stiffness);
-                (*SObj)->TryGetNumberField(TEXT("drag"), S.Drag);
-                S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0, 0, -1));
-                (*SObj)->TryGetNumberField(TEXT("gravityPower"), S.GravityPower);
-                (*SObj)->TryGetNumberField(TEXT("hitRadius"), S.HitRadius);
+                // Track if these were set at the spring level; if not, we'll adopt joint-level values
+                bool bStiffSet = false, bDragSet = false, bGravPowSet = false, bGravDirSet = false, bHitSet = false;
+
+                float TmpF = 0.f;
+                if ((*SObj)->TryGetNumberField(TEXT("stiffness"), TmpF)) { S.Stiffness = TmpF; bStiffSet = true; }
+                if ((*SObj)->TryGetNumberField(TEXT("drag"), TmpF)) { S.Drag = TmpF; bDragSet = true; }
+                else if ((*SObj)->TryGetNumberField(TEXT("dragForce"), TmpF)) { S.Drag = TmpF; bDragSet = true; }
+                if ((*SObj)->TryGetNumberField(TEXT("gravityPower"), TmpF)) { S.GravityPower = TmpF; bGravPowSet = true; }
+                // gravityDir vector
+                {
+                    const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+                    if ((*SObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
+                    {
+                        S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0,0,-1));
+                        bGravDirSet = true;
+                    }
+                }
+                if ((*SObj)->TryGetNumberField(TEXT("hitRadius"), TmpF)) { S.HitRadius = TmpF; bHitSet = true; }
 
                 const TArray<TSharedPtr<FJsonValue>>* SJ = nullptr;
                 if ((*SObj)->TryGetArrayField(TEXT("joints"), SJ) && SJ)
@@ -436,9 +448,29 @@ namespace
                             (*JObj)->TryGetNumberField(TEXT("node"), J.NodeIndex);
                             (*JObj)->TryGetNumberField(TEXT("hitRadius"), J.HitRadius);
 
+                            // Adopt per-joint parameters as spring defaults if spring-level did not specify them
+                            float JVal = 0.f; bool bAnyAdopted = false;
+                            if (!bStiffSet && (*JObj)->TryGetNumberField(TEXT("stiffness"), JVal)) { S.Stiffness = JVal; bStiffSet = true; bAnyAdopted = true; }
+                            if (!bDragSet && ( (*JObj)->TryGetNumberField(TEXT("drag"), JVal) || (*JObj)->TryGetNumberField(TEXT("dragForce"), JVal) )) { S.Drag = JVal; bDragSet = true; bAnyAdopted = true; }
+                            if (!bGravPowSet && (*JObj)->TryGetNumberField(TEXT("gravityPower"), JVal)) { S.GravityPower = JVal; bGravPowSet = true; bAnyAdopted = true; }
+                            if (!bGravDirSet)
+                            {
+                                const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+                                if ((*JObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
+                                {
+                                    S.GravityDir = ReadVec3(*JObj, TEXT("gravityDir"), FVector(0,0,-1));
+                                    bGravDirSet = true; bAnyAdopted = true;
+                                }
+                            }
+                            if (!bHitSet && (*JObj)->TryGetNumberField(TEXT("hitRadius"), JVal)) { S.HitRadius = JVal; bHitSet = true; bAnyAdopted = true; }
+
+                            if (bAnyAdopted)
+                            {
+                                UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Adopted spring params from joint object for spring '%s' (node=%d)"), *S.Name, J.NodeIndex);
+                            }
+
                             const int32 NewJointIndex = Out.Joints.Add(MoveTemp(J));
                             S.JointIndices.Add(NewJointIndex);
-                            UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Inline joint object parsed and appended as joint index %d (node=%d)"), NewJointIndex, Out.Joints.IsValidIndex(NewJointIndex) ? Out.Joints[NewJointIndex].NodeIndex : INDEX_NONE);
                         }
                         else
                         {
