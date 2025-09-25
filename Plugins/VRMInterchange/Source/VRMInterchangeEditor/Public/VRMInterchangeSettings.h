@@ -23,5 +23,13 @@ public:
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, overwrite existing generated spring assets. If false, create with a suffix."))
     bool bOverwriteExistingSpringAssets = false;
 
+    // New: separate control for overwriting generated Post-Process AnimBlueprints
+    UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, overwrite existing generated Post-Process AnimBlueprints. If false, create with a unique name."))
+    bool bOverwriteExistingPostProcessABP = false;
+
+    // New: control whether to reuse an existing Post-Process ABP on re-import (preferred safe default)
+    UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, attempt to reuse an existing Post-Process AnimBP when re-importing. If false, the importer will offer to overwrite or create a new ABP."))
+    bool bReusePostProcessABPOnReimport = true;
+
     virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 };

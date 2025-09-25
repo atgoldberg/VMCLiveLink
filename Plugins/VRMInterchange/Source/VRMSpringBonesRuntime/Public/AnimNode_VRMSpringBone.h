@@ -59,6 +59,23 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring")
     bool bForceReset = false;
 
+    // Unit conversion for VRM radii (VRM is meters, UE is centimeters)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Collision")
+    bool bVRMRadiiInMeters = true;
+
+    // Scale applied to VRM radii values when bVRMRadiiInMeters is true (default 100 cm/m)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Collision", meta=(EditCondition="bVRMRadiiInMeters", ClampMin="0.1", ClampMax="1000"))
+    float VRMToCentimetersScale = 100.f;
+
+    // Collision response tuning
+    // Tangential velocity retained after collision: 0 = no friction (retain full tangent), 1 = full stop of tangent
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Collision", meta=(ClampMin="0", ClampMax="1"))
+    float CollisionFriction = 0.2f;
+
+    // Elasticity along collision normal: 0 = absorb (no bounce), 1 = reflect full normal velocity
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Collision", meta=(ClampMin="0", ClampMax="1"))
+    float CollisionRestitution = 0.0f;
+
     struct FChainInfo
     {
             // Resolved bones
@@ -81,6 +98,8 @@ public:
             FName  CenterBoneName;                        // optional
             FCompactPoseBoneIndex CenterCompactIndex = FCompactPoseBoneIndex(INDEX_NONE);
             float  CenterPullStrength = 0.f;              // 0 disables
+            // Per-joint radii (from joint entries) — matches CompactIndices ordering
+            TArray<float> JointHitRadii;
             // Stats
             int32 IntendedJointCount = 0;
             int32 MissingJointCount = 0;
@@ -100,6 +119,10 @@ public:
     // Test helper: compute rest data for a chain from a supplied reference skeleton (no BoneContainer needed)
     static void ComputeRestFromReferenceSkeleton(const struct FReferenceSkeleton& RefSkel, FChainInfo& Chain);
     static void ComputeRestFromPositions(FChainInfo& Chain);
+
+    // Lightweight math helpers exposed for tests
+    static FVector ProjectPointOnSegment(const FVector& A, const FVector& B, const FVector& P);
+    static void ResolveCapsuleCollisionTestHook(FVector& JointPos, FVector& PrevPos, const FVector& A, const FVector& B, float CapsuleRadius, float JointRadius, float Friction, float Restitution);
 
 private:
     void BuildChains(const FBoneContainer& BoneContainer);

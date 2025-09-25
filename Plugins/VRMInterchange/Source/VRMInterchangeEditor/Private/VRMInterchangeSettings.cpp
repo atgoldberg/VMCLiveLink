@@ -11,4 +11,7 @@ UVRMInterchangeSettings::UVRMInterchangeSettings()
 	bGeneratePostProcessAnimBP = false;
 	bAssignPostProcessABP = false;
 	bOverwriteExistingSpringAssets = false;
+	bOverwriteExistingPostProcessABP = false;
+	// New default: prefer reusing existing ABP on re-import
+	bReusePostProcessABPOnReimport = true;
 }
