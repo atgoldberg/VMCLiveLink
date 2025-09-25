@@ -2,13 +2,66 @@
 #include "Animation/AnimInstanceProxy.h"
 #include "AnimationRuntime.h"
 #include "VRMInterchangeLog.h"
+#include "HAL/IConsoleManager.h"
+#include "Engine/EngineTypes.h"
+#include "Animation/AnimInstance.h"
+#include "UObject/SoftObjectPtr.h"
 
 #define LOCTEXT_NAMESPACE "AnimNode_VRMSpringBone"
+
+// Debug CVars
+static TAutoConsoleVariable<int32> CVarVRMSpringDebug(
+    TEXT("vrm.Spring.Debug"),
+    0,
+    TEXT("Enable verbose VRM spring debug logging (0=off,1=summary,2=verbose)."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVRMSpringDraw(
+    TEXT("vrm.Spring.Draw"),
+    0,
+    TEXT("Draw spring chains in-world from the anim node (0=off,1=positions,2=positions+animated)."),
+    ECVF_Default);
 
 static FVector ResolveSpringGravity(const FVRMSpring& Spring, const FVector& DefaultGravity)
 {
     const FVector Dir = Spring.GravityDir.GetSafeNormal();
     return DefaultGravity + Dir * Spring.GravityPower;
+}
+
+// Helper: try to pull SpringConfig from the owning AnimInstance when binding didn't set it (PP ABP edge cases)
+static UVRMSpringBoneData* TryAdoptSpringConfigFromAnimInstance(FAnimInstanceProxy* Proxy)
+{
+    if (!Proxy) return nullptr;
+    UAnimInstance* AnimInst = Cast<UAnimInstance>(Proxy->GetAnimInstanceObject());
+    if (!AnimInst) return nullptr;
+
+    UClass* Cls = AnimInst->GetClass();
+
+    if (FObjectProperty* ObjProp = FindFProperty<FObjectProperty>(Cls, TEXT("SpringConfig")))
+    {
+        if (ObjProp->PropertyClass && ObjProp->PropertyClass->IsChildOf(UVRMSpringBoneData::StaticClass()))
+        {
+            return Cast<UVRMSpringBoneData>(ObjProp->GetObjectPropertyValue_InContainer(AnimInst));
+        }
+    }
+    if (FSoftObjectProperty* SoftProp = FindFProperty<FSoftObjectProperty>(Cls, TEXT("SpringConfig")))
+    {
+        const FSoftObjectPtr* SoftPtr = SoftProp->GetPropertyValuePtr_InContainer(AnimInst);
+        if (SoftPtr)
+        {
+            UObject* Obj = SoftPtr->Get();
+            if (!Obj)
+            {
+                const FSoftObjectPath& Path = SoftPtr->ToSoftObjectPath();
+                if (Path.IsValid())
+                {
+                    Obj = Path.TryLoad();
+                }
+            }
+            return Cast<UVRMSpringBoneData>(Obj);
+        }
+    }
+    return nullptr;
 }
 
 // Static test helper
@@ -74,6 +127,25 @@ void FAnimNode_VRMSpringBone::CacheBones_AnyThread(const FAnimationCacheBonesCon
 {
     ComponentPose.CacheBones(Context);
     const FBoneContainer& BoneContainer = Context.AnimInstanceProxy->GetRequiredBones();
+
+    // Fallback adoption: PP ABP binding can fail before first CacheBones; try to read the AnimInstance variable here
+    if (!SpringConfig)
+    {
+        if (UVRMSpringBoneData* Adopted = TryAdoptSpringConfigFromAnimInstance(Context.AnimInstanceProxy))
+        {
+            SpringConfig = Adopted;
+            CachedSourceHash = SpringConfig ? SpringConfig->SourceHash : CachedSourceHash;
+            UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring] CacheBones: Adopted SpringConfig from AnimInstance: %s"), SpringConfig ? *SpringConfig->GetName() : TEXT("<null>"));
+        }
+    }
+
+    const int32 DebugLevel = CVarVRMSpringDebug.GetValueOnAnyThread();
+    if (DebugLevel >= 1)
+    {
+        UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring] CacheBones: SpringConfig=%s Chains=%d NeedsRebuild=%s"),
+            SpringConfig? *SpringConfig->GetName() : TEXT("<null>"), Chains.Num(), NeedsRebuild()? TEXT("true") : TEXT("false"));
+    }
+
     if (NeedsRebuild()) { BuildChains(BoneContainer); ComputeReferencePoseRestLengths(BoneContainer); }
 }
 
@@ -98,9 +170,58 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
 {
     ComponentPose.Evaluate(Output);
 
+    const int32 DebugLevel = CVarVRMSpringDebug.GetValueOnAnyThread();
+    const int32 DrawLevel  = CVarVRMSpringDraw.GetValueOnAnyThread();
+
+    // Late adoption in case binding populated after Initialize
+    if (!SpringConfig)
+    {
+        if (UVRMSpringBoneData* Adopted = TryAdoptSpringConfigFromAnimInstance(Output.AnimInstanceProxy))
+        {
+            SpringConfig = Adopted;
+            CachedSourceHash = SpringConfig ? SpringConfig->SourceHash : CachedSourceHash;
+            if (DebugLevel >= 1)
+            {
+                UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring] Evaluate: Adopted SpringConfig from AnimInstance: %s"), SpringConfig ? *SpringConfig->GetName() : TEXT("<null>"));
+            }
+        }
+    }
+
+    if (DebugLevel >= 2)
+    {
+        const TCHAR* CfgName = SpringConfig ? *SpringConfig->GetName() : TEXT("<null>");
+        const bool bCfgValid = SpringConfig && SpringConfig->SpringConfig.IsValid();
+        UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring] Evaluate: Pre-check Chains=%d SpringConfig=%s IsValid=%s NeedsRebuild=%s"),
+            Chains.Num(), CfgName, bCfgValid?TEXT("true"):TEXT("false"), NeedsRebuild()?TEXT("true"):TEXT("false"));
+    }
+
+    // Opportunistic runtime build if chains are missing
+    if (Chains.Num() == 0)
+    {
+        if (SpringConfig && SpringConfig->SpringConfig.IsValid())
+        {
+            if (DebugLevel >= 1)
+            {
+                UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring] Evaluate: Chains empty, attempting on-the-fly BuildChains."));
+            }
+            BuildChains(Output.Pose.GetBoneContainer());
+            ComputeReferencePoseRestLengths(Output.Pose.GetBoneContainer());
+        }
+        else if (DebugLevel >= 1)
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] Evaluate: Chains empty and SpringConfig is %s/%s."),
+                SpringConfig?TEXT("present"):TEXT("null"),
+                (SpringConfig && SpringConfig->SpringConfig.IsValid())?TEXT("valid"):TEXT("invalid"));
+        }
+    }
+
     // Seed when simulation disabled
     if (!bEnableSimulation)
     {
+        if (DebugLevel >= 2)
+        {
+            UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring] Evaluate: simulation disabled; Chains=%d"), Chains.Num());
+        }
         for (FChainInfo& Chain : Chains)
         {
             if (!Chain.bInitializedPositions && Chain.RestComponentPositions.Num() == Chain.CompactIndices.Num())
@@ -113,7 +234,14 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
         return;
     }
 
-    if (Chains.Num() == 0) return;
+    if (Chains.Num() == 0)
+    {
+        if (DebugLevel >= 1)
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] Evaluate: no Chains; check BuildChains and data asset binding."));
+        }
+        return;
+    }
 
     FCSPose<FCompactPose> CSPose; CSPose.InitPose(Output.Pose);
 
@@ -126,7 +254,7 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
             Chain.CurrPositions.SetNum(Count); Chain.PrevPositions.SetNum(Count);
             for (int32 i=0;i<Count;++i)
             { Chain.CurrPositions[i] = CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i]).GetLocation(); Chain.PrevPositions[i] = Chain.CurrPositions[i]; }
-            Chain.bInitializedPositions = true; bPendingTeleportReset = false; continue;
+            Chain.bInitializedPositions = true; bPendingTeleportReset = false; if (DebugLevel >= 2) { UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring] Initialize positions for chain; Joints=%d"), Count); } continue;
         }
 
         // Resolve per-spring params
@@ -183,6 +311,29 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
             }
         }
 
+        // Optional debug draw
+        if (DrawLevel > 0)
+        {
+            const FColor ChainColor = FColor::Cyan;
+            USkeletalMeshComponent* SkelComp = Output.AnimInstanceProxy ? Output.AnimInstanceProxy->GetSkelMeshComponent() : nullptr;
+            const FTransform C2W = SkelComp ? SkelComp->GetComponentToWorld() : FTransform::Identity;
+            auto ToWorld = [&](const FVector& P) -> FVector { return C2W.TransformPosition(P); };
+
+            for (int32 i=1;i<Count;++i)
+            {
+                const FVector ParentSimPosWS = ToWorld(Chain.CurrPositions[i-1]);
+                const FVector ChildSimPosWS  = ToWorld(Chain.CurrPositions[i]);
+                // FAnimInstanceProxy signature: (Start, End, Color, bPersistent, LifeTime, Thickness, DepthPriority)
+                Output.AnimInstanceProxy->AnimDrawDebugLine(ParentSimPosWS, ChildSimPosWS, ChainColor, false, 0.f, 2.f, SDPG_World);
+                if (DrawLevel > 1)
+                {
+                    const FVector ParentAnimWS = ToWorld(CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i-1]).GetLocation());
+                    const FVector ChildAnimWS  = ToWorld(CSPose.GetComponentSpaceTransform(Chain.CompactIndices[i]).GetLocation());
+                    Output.AnimInstanceProxy->AnimDrawDebugLine(ParentAnimWS, ChildAnimWS, FColor::Orange, false, 0.f, 1.f, SDPG_World);
+                }
+            }
+        }
+
         // Write back rotations
         FCompactPose& Pose = Output.Pose;
         for (int32 i=1;i<Count;++i)
@@ -194,6 +345,11 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
             const FCompactPoseBoneIndex ChildIdx = Chain.CompactIndices[i]; FTransform LocalBone = Pose[ChildIdx];
             LocalBone.SetRotation( (DeltaRot * LocalBone.GetRotation()).GetNormalized() ); Pose[ChildIdx] = LocalBone;
         }
+
+        if (DebugLevel >= 2)
+        {
+            UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring] Simulated chain: Joints=%d Steps=%d Stiff=%.2f Damp=%.2f"), Count, Steps, Stiff, Damp);
+        }
     }
 }
 
@@ -201,28 +357,52 @@ void FAnimNode_VRMSpringBone::GatherDebugData(FNodeDebugData& DebugData)
 {
     int32 TotalJoints=0, Missing=0; for (const FChainInfo& C : Chains){ TotalJoints += C.CompactIndices.Num(); Missing += C.MissingJointCount; }
     const TCHAR* SimText = bEnableSimulation? TEXT("On") : TEXT("Off");
-    FString Line = FString::Printf(TEXT("VRMSpringBone (Springs=%d Resolved=%d Missing=%d Sim=%s Steps=%d Dt=%.3f)"), Chains.Num(), TotalJoints, Missing, SimText, MaxSubsteps, LastDeltaTime);
+    const TCHAR* CfgName = SpringConfig ? *SpringConfig->GetName() : TEXT("<null>");
+    FString Line = FString::Printf(TEXT("VRMSpringBone (Springs=%d Resolved=%d Missing=%d Sim=%s Steps=%d Dt=%.3f Config=%s)"), Chains.Num(), TotalJoints, Missing, SimText, MaxSubsteps, LastDeltaTime, CfgName);
     DebugData.AddDebugItem(Line);
     ComponentPose.GatherDebugData(DebugData);
 }
 
 bool FAnimNode_VRMSpringBone::NeedsRebuild() const
 {
+    // If no config is set, ensure we clear any existing chains
     if (!SpringConfig) { return Chains.Num() != 0; }
-    return CachedSourceHash != SpringConfig->SourceHash || Chains.Num() != SpringConfig->SpringConfig.Springs.Num();
+    // Rebuild if the source changed (hash mismatch) or if we haven't built any chains yet.
+    return CachedSourceHash != SpringConfig->SourceHash || Chains.Num() == 0;
 }
 
 bool FAnimNode_VRMSpringBone::RuntimeNeedsRebuild() const
 {
+    // When config is removed at runtime, clear existing chains
     if (!SpringConfig) { return Chains.Num() != 0; }
-    return (CachedSourceHash != SpringConfig->SourceHash) || (Chains.Num() != SpringConfig->SpringConfig.Springs.Num());
+    // Only rebuild when the underlying data changes; don't compare counts since some springs may be invalid/filtered.
+    return (CachedSourceHash != SpringConfig->SourceHash);
 }
 
 void FAnimNode_VRMSpringBone::BuildChains(const FBoneContainer& BoneContainer)
 {
     Chains.Reset();
-    if (!SpringConfig || !SpringConfig->SpringConfig.IsValid()) return;
+    const int32 DebugLevel = CVarVRMSpringDebug.GetValueOnAnyThread();
+
+    if (!SpringConfig)
+    {
+        if (DebugLevel >= 1)
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] BuildChains: SpringConfig is null; cannot build."));
+        }
+        return;
+    }
+    if (!SpringConfig->SpringConfig.IsValid())
+    {
+        if (DebugLevel >= 1)
+        {
+            UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] BuildChains: SpringConfig->SpringConfig is invalid; cannot build."));
+        }
+        return;
+    }
+
     const FVRMSpringConfig& Config = SpringConfig->SpringConfig; Chains.Reserve(Config.Springs.Num());
+    int32 AddedChains = 0;
     for (int32 SpringIdx=0; SpringIdx<Config.Springs.Num(); ++SpringIdx)
     {
         const FVRMSpring& Spring = Config.Springs[SpringIdx];
@@ -244,9 +424,20 @@ void FAnimNode_VRMSpringBone::BuildChains(const FBoneContainer& BoneContainer)
             if (Ref.IsValidToEvaluate(BoneContainer)) { Chain.CompactIndices.Add(Ref.GetCompactPoseIndex(BoneContainer)); Chain.BoneRefs.Add(MoveTemp(Ref)); }
             else { ++Chain.MissingJointCount; }
         }
-        if (Chain.CompactIndices.Num() > 0) { Chains.Add(MoveTemp(Chain)); }
+        if (Chain.CompactIndices.Num() > 0) { Chains.Add(MoveTemp(Chain)); ++AddedChains; }
     }
     if (SpringConfig) { CachedSourceHash = SpringConfig->SourceHash; }
+
+    if (DebugLevel >= 1)
+    {
+        int32 TotalMissing=0; for (const FChainInfo& C : Chains){ TotalMissing += C.MissingJointCount; }
+        UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring] BuildChains: Added=%d Springs=%d MissingJoints=%d Hash=%s"), AddedChains, Chains.Num(), TotalMissing, *CachedSourceHash);
+        for (int32 Idx=0; DebugLevel>=2 && Idx<Chains.Num(); ++Idx)
+        {
+            const FChainInfo& C = Chains[Idx];
+            UE_LOG(LogVRMSpring, Verbose, TEXT("  Chain[%d]: Joints=%d Missing=%d Stiff=%.2f Drag=%.2f Center=%s"), Idx, C.CompactIndices.Num(), C.MissingJointCount, C.SpringStiffness, C.SpringDrag, *C.CenterBoneName.ToString());
+        }
+    }
 }
 
 void FAnimNode_VRMSpringBone::ComputeReferencePoseRestLengths(const FBoneContainer& BoneContainer)
