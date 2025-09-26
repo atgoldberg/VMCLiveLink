@@ -215,6 +215,8 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         else
         {
             const FString AnimFolder = PackagePath / AnimationSubFolder;
+            const FString CharacterName = FPaths::GetBaseFilename(Filename);
+            const FString DesiredABPName = FString::Printf(TEXT("ABP_VRMSpringBones_%s"), *CharacterName);
 
             // If reuse-on-reimport is enabled, attempt to find an existing ABP in the target animation folder and just update its SpringConfig
             UObject* DuplicatedABP = nullptr;
@@ -225,10 +227,10 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
                 TArray<FAssetData> Found; ARM.Get().GetAssets(Filter, Found);
                 if (Found.Num() > 0)
                 {
-                    // Prefer exact-named ABP if present
+                    // Prefer exact-named ABP for this character if present
                     for (const FAssetData& AD : Found)
                     {
-                        if (AD.AssetName.ToString().Equals(TEXT("ABP_VRMSpringBones"), ESearchCase::IgnoreCase))
+                        if (AD.AssetName.ToString().Equals(DesiredABPName, ESearchCase::IgnoreCase))
                         {
                             DuplicatedABP = AD.GetAsset();
                             break;
@@ -253,7 +255,7 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
 
             if (!DuplicatedABP)
             {
-                DuplicatedABP = DuplicateTemplateAnimBlueprint(AnimFolder, TEXT("ABP_VRMSpringBones"), Skeleton ? Skeleton : (SkelMesh ? SkelMesh->GetSkeleton() : nullptr), bWantsABPOverwrite);
+                DuplicatedABP = DuplicateTemplateAnimBlueprint(AnimFolder, DesiredABPName, Skeleton ? Skeleton : (SkelMesh ? SkelMesh->GetSkeleton() : nullptr), bWantsABPOverwrite);
             }
 
             if (DuplicatedABP && SpringDataAsset)
@@ -423,4 +425,6 @@ void UVRMSpringBonesPostImportPipeline::UnregisterDeferredABP()
 
 void UVRMSpringBonesPostImportPipeline::OnAssetAddedForDeferredABP(const FAssetData& AssetData)
 {
-    if(bDeferredCompleted||!AssetData.IsValid()) return; const FName ClassName=AssetData.AssetClassPath.GetAssetName(); const bool bIsSkeletalMesh=(ClassName==USkeletalMesh::StaticClass()->GetFName()); const bool bIsSkeleton=(ClassName==USkeleton::StaticClass()->GetFName()); if(!bIsSkeletalMesh&&!bIsSkeleton) return; const FString PkgPath=AssetData.PackagePath.ToString(); if(!PkgPath.StartsWith(DeferredSkeletonSearchRoot)&&!PkgPath.StartsWith(DeferredAltSkeletonSearchRoot)) return; USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr; bool bFound=FindImportedSkeletalAssets(DeferredSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) bFound=FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) return; UObject* DuplicatedABP=DuplicateTemplateAnimBlueprint(DeferredPackagePath/AnimationSubFolder,TEXT("ABP_VRMSpringBones"),Skeleton?Skeleton:(SkelMesh?SkelMesh->GetSkeleton():nullptr), bOverwriteExistingPostProcessABP); if(!DuplicatedABP){ UnregisterDeferredABP(); bDeferredCompleted=true; return; } if(UVRMSpringBoneData* SpringData=DeferredSpringDataAsset.Get()){ SetSpringConfigOnAnimBlueprint(DuplicatedABP,SpringData);} if(bDeferredWantsAssign&&SkelMesh){ AssignPostProcessABPToMesh(SkelMesh,DuplicatedABP); if(UPackage* MeshPkg=SkelMesh->GetOutermost()){ const FString MeshPkgFilename=FPackageName::LongPackageNameToFilename(MeshPkg->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(MeshPkg,SkelMesh,*MeshPkgFilename,SaveArgs);} } if(UObject* Outer=DuplicatedABP->GetOutermost()) if(UPackage* Pkg=Cast<UPackage>(Outer)){ const FString FN=FPackageName::LongPackageNameToFilename(Pkg->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(Pkg,nullptr,*FN,SaveArgs);} UnregisterDeferredABP(); bDeferredCompleted=true; }
+    if(bDeferredCompleted||!AssetData.IsValid()) return; const FName ClassName=AssetData.AssetClassPath.GetAssetName(); const bool bIsSkeletalMesh=(ClassName==USkeletalMesh::StaticClass()->GetFName()); const bool bIsSkeleton=(ClassName==USkeleton::StaticClass()->GetFName()); if(!bIsSkeletalMesh&&!bIsSkeleton) return; const FString PkgPath=AssetData.PackagePath.ToString(); if(!PkgPath.StartsWith(DeferredSkeletonSearchRoot)&&!PkgPath.StartsWith(DeferredAltSkeletonSearchRoot)) return; USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr; bool bFound=FindImportedSkeletalAssets(DeferredSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) bFound=FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) return; const FString CharacterName = FPaths::GetCleanFilename(DeferredPackagePath);
+    const FString DesiredABPName = FString::Printf(TEXT("ABP_VRMSpringBones_%s"), *CharacterName);
+    UObject* DuplicatedABP=DuplicateTemplateAnimBlueprint(DeferredPackagePath/AnimationSubFolder, DesiredABPName, Skeleton?Skeleton:(SkelMesh?SkelMesh->GetSkeleton():nullptr), bOverwriteExistingPostProcessABP); if(!DuplicatedABP){ UnregisterDeferredABP(); bDeferredCompleted=true; return; } if(UVRMSpringBoneData* SpringData=DeferredSpringDataAsset.Get()){ SetSpringConfigOnAnimBlueprint(DuplicatedABP,SpringData);} if(bDeferredWantsAssign&&SkelMesh){ AssignPostProcessABPToMesh(SkelMesh,DuplicatedABP); if(UPackage* MeshPkg=SkelMesh->GetOutermost()){ const FString MeshPkgFilename=FPackageName::LongPackageNameToFilename(MeshPkg->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(MeshPkg,SkelMesh,*MeshPkgFilename,SaveArgs);} } if(UObject* Outer=DuplicatedABP->GetOutermost()) if(UPackage* Pkg=Cast<UPackage>(Outer)){ const FString FN=FPackageName::LongPackageNameToFilename(Pkg->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(Pkg,nullptr,*FN,SaveArgs);} UnregisterDeferredABP(); bDeferredCompleted=true; }

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 #include "VRMSpringBonesPostImportPipeline.h"
+#include "VRMIKRigPostImportPipeline.h"
 #include "InterchangeProjectSettings.h"
 #include "VRMTranslator.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -17,6 +18,16 @@ static UObject* FindPluginDefaultSpringBonesPipelineAsset()
 {
 	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultSpringBonesPipeline.DefaultSpringBonesPipeline");
 	if (UObject* Existing = StaticLoadObject(UVRMSpringBonesPostImportPipeline::StaticClass(), nullptr, PluginObjectPath))
+	{
+		return Existing;
+	}
+	return nullptr;
+}
+
+static UObject * FindPluginDefaultVRMIKRigPipelineAsset()
+{
+	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMIKRigPipeline.DefaultVRMIKRigPipeline");
+	if (UObject* Existing = StaticLoadObject(UVRMIKRigPostImportPipeline::StaticClass(), nullptr, PluginObjectPath))
 	{
 		return Existing;
 	}
@@ -41,6 +52,7 @@ static void AppendVRMSpringBonesPipeline()
 		FInterchangeTranslatorPipelines NewEntry; NewEntry.Translator = UVRMTranslator::StaticClass(); NewEntry.Pipelines = AssetsStack->Pipelines; AssetsStack->PerTranslatorPipelines.Add(MoveTemp(NewEntry)); Per = &AssetsStack->PerTranslatorPipelines.Last();
 	}
 	const FSoftObjectPath SpringClassPath(TEXT("/Script/VRMInterchangeEditor.VRMSpringBonesPostImportPipeline"));
+	
 	auto ContainsPath=[&](const FSoftObjectPath& P){ for(const FSoftObjectPath& Existing:Per->Pipelines){ if(Existing.ToString()==P.ToString()) return true;} return false; };
 	bool bDirty=false;
 	if (UObject* PluginPipeline=FindPluginDefaultSpringBonesPipelineAsset())
@@ -49,6 +61,34 @@ static void AppendVRMSpringBonesPipeline()
 	}
 	else if(!ContainsPath(SpringClassPath)) { Per->Pipelines.Add(SpringClassPath); bDirty=true; }
 	if(bDirty) Settings->SaveConfig();
+}
+
+static void AppendVRMIKRigPipeline()
+{
+	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>();
+	if (!Settings) return;
+	FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings, false);
+	FInterchangePipelineStack* AssetsStack = ImportSettings.PipelineStacks.Find(TEXT("Assets"));
+	if (!AssetsStack) return;
+	const FString TranslatorPath = UVRMTranslator::StaticClass()->GetPathName();
+	FInterchangeTranslatorPipelines* Per = nullptr;
+	for (FInterchangeTranslatorPipelines& It : AssetsStack->PerTranslatorPipelines)
+	{
+		if (It.Translator.ToSoftObjectPath().ToString() == TranslatorPath) { Per = &It; break; }
+	}
+	if (!Per)
+	{
+		FInterchangeTranslatorPipelines NewEntry; NewEntry.Translator = UVRMTranslator::StaticClass(); NewEntry.Pipelines = AssetsStack->Pipelines; AssetsStack->PerTranslatorPipelines.Add(MoveTemp(NewEntry)); Per = &AssetsStack->PerTranslatorPipelines.Last();
+	}
+	const FSoftObjectPath IKRigClassPath(TEXT("/Script/VRMInterchangeEditor.VRMIKRigPostImportPipeline"));	
+	auto ContainsPath = [&](const FSoftObjectPath& P) { for (const FSoftObjectPath& Existing : Per->Pipelines) { if (Existing.ToString() == P.ToString()) return true; } return false; };
+	bool bDirty = false;
+	if (UObject* PluginPipeline = FindPluginDefaultVRMIKRigPipelineAsset())
+	{
+		const FSoftObjectPath IKRigAssetPath(PluginPipeline); if (!ContainsPath(IKRigAssetPath)) { Per->Pipelines.Add(IKRigAssetPath); bDirty = true; }
+	}
+	else if (!ContainsPath(IKRigClassPath)) { Per->Pipelines.Add(IKRigClassPath); bDirty = true; }
+	if (bDirty) Settings->SaveConfig();
 }
 
 // Track hashes of spring data assets created this session but never (successfully) saved.
@@ -90,8 +130,10 @@ IMPLEMENT_MODULE(FVRMInterchangeEditorModule, VRMInterchangeEditor)
 void FVRMInterchangeEditorModule::StartupModule()
 {
 	UVRMSpringBonesPostImportPipeline::StaticClass();
+	UVRMIKRigPostImportPipeline::StaticClass();
 #if WITH_EDITOR
 	AppendVRMSpringBonesPipeline();
+	AppendVRMIKRigPipeline();
 	FCoreDelegates::OnPreExit.AddStatic(&HandlePreExit);
 #endif
 }
