@@ -42,6 +42,14 @@
     {
       "Name": "InterchangeEditor",
       "Enabled": true
+    },
+    {
+      "Name": "IKRig",
+      "Enabled": true
+    },
+    {
+      "Name": "LiveLink",
+      "Enabled": true
     }
   ],
 
