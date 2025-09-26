@@ -42,6 +42,9 @@ public class VRMInterchangeEditor : ModuleRules
 
             // Runtime plugin module this editor module depends on
             "VRMInterchange",
+
+            // For IKRigDefinition asset
+            "IKRig",
         });
 
         // We share some includes with the runtime module (optional)
