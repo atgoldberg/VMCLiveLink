@@ -72,6 +72,14 @@ namespace
         return FVector((float)GetF((*Arr)[0]), (float)GetF((*Arr)[1]), (float)GetF((*Arr)[2]));
     }
 
+    // Convert a direction from glTF/VRM coordinate space into Unreal coordinate space (Z-up)
+    // glTF: (X right, Y up, Z forward) -> Unreal: (X forward, Y right, Z up)
+    // Mapping used here: UE = (glTF.Z, glTF.X, glTF.Y)
+    static FORCEINLINE FVector GltfToUE_Dir(const FVector& V)
+    {
+        return FVector(V.Z, V.X, V.Y);
+    }
+
     // Helper: Some exporters wrap shapes as { "sphere": {..} } or { "capsule": {..} }
     // Others use { "shape": { "sphere": {..} } } or { "shape": { "capsule": {..} } }
     static void ParseOneShapeObject(const TSharedPtr<FJsonObject>& ShapeEntry,
@@ -428,7 +436,10 @@ namespace
                     const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
                     if ((*SObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
                     {
-                        S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0,0,-1));
+                        // Default for JSON is glTF space (Y-up), so use (0,-1,0) as glTF down
+                        S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0,-1,0));
+                        // Convert parsed glTF direction into Unreal (Z-up)
+                        S.GravityDir = GltfToUE_Dir(S.GravityDir);
                         bGravDirSet = true;
                     }
                 }
@@ -458,7 +469,9 @@ namespace
                                 const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
                                 if ((*JObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
                                 {
-                                    S.GravityDir = ReadVec3(*JObj, TEXT("gravityDir"), FVector(0,0,-1));
+                                    // Read joint-level gravityDir (glTF space) and convert to UE space
+                                    S.GravityDir = ReadVec3(*JObj, TEXT("gravityDir"), FVector(0,-1,0));
+                                    S.GravityDir = GltfToUE_Dir(S.GravityDir);
                                     bGravDirSet = true; bAnyAdopted = true;
                                 }
                             }
@@ -589,7 +602,9 @@ namespace
                 // preferred 'stiffness'
                 (*BObj)->TryGetNumberField(TEXT("stiffness"), Spring.Stiffness);
                 (*BObj)->TryGetNumberField(TEXT("dragForce"), Spring.Drag);
-                Spring.GravityDir = ReadVec3(*BObj, TEXT("gravityDir"), FVector(0, 0, -1));
+                // Read glTF-space gravityDir defaulting to glTF down (0,-1,0), then convert to UE space
+                Spring.GravityDir = ReadVec3(*BObj, TEXT("gravityDir"), FVector(0, -1, 0));
+                Spring.GravityDir = GltfToUE_Dir(Spring.GravityDir);
                 (*BObj)->TryGetNumberField(TEXT("gravityPower"), Spring.GravityPower);
                 (*BObj)->TryGetNumberField(TEXT("hitRadius"), Spring.HitRadius);
 
