@@ -13,10 +13,25 @@
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rig/IKRigDefinition.h"
+#include "VRMInterchangeSettings.h" // new settings include
 
 void UVRMIKRigPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
+	// Global project setting gate
+	if (const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>())
+	{
+		if (!Settings->bGenerateIKRigAssets)
+		{
+			return; // disabled at project level
+		}
+	}
+	// Per-pipeline instance toggle
+	if (!bGenerateIKRig)
+	{
+		return;
+	}
+
 	if (!BaseNodeContainer)
 	{
 		return;

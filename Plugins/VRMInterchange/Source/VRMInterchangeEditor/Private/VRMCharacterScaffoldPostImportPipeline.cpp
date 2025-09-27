@@ -17,11 +17,21 @@
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Engine/Blueprint.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "VRMInterchangeSettings.h" // project settings
 
 void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
-	if(!bGenerateScaffold) return;
+	// Project setting gate
+	if (const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>())
+	{
+		if (!Settings->bGenerateLiveLinkEnabledActor)
+		{
+			return; // disabled globally
+		}
+	}
+
+	if(!bGenerateScaffold) return; // per-instance toggle
 	if(!BaseNodeContainer) return;
 	const UInterchangeSourceData* Source=nullptr; for(const UInterchangeSourceData* SD:SourceDatas){ if(SD){ Source=SD; break; }} if(!Source) return;
 	const FString Filename = Source->GetFilename();
@@ -31,7 +41,7 @@ void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNo
 	// Target names
 	const FString ActorBPName = FString::Printf(TEXT("BP_VRM_%s"), *CharacterName);
 	const FString AnimBPName  = FString::Printf(TEXT("ABP_VRM_%s"), *CharacterName);
-	// New LiveLink folder root
+	// LiveLink folder root
 	const FString LiveLinkFolder = CharacterBasePath / TEXT("LiveLink");
 	const FString AnimFolder = LiveLinkFolder / AnimationSubFolder;
 
@@ -39,7 +49,7 @@ void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNo
 	const bool bFoundHere = FindImportedSkeletalAssets(CharacterBasePath, SkelMesh, Skeleton) && (SkelMesh||Skeleton);
 	const bool bFoundParent = !bFoundHere && FindImportedSkeletalAssets(GetParentPackagePath(CharacterBasePath), SkelMesh, Skeleton) && (SkelMesh||Skeleton);
 
-	// Duplicate templates now (even if skeletal mesh not yet present) so names are reserved
+	// Duplicate templates now (reserve names)
 	UObject* ActorBPObj = DuplicateTemplate(TEXT("/VRMInterchange/BP_VRM_Template.BP_VRM_Template"), LiveLinkFolder, ActorBPName, bOverwriteExisting);
 	UObject* AnimBPObj  = DuplicateTemplate(TEXT("/VRMInterchange/Animation/ABP_VRM_Template.ABP_VRM_Template"), AnimFolder, AnimBPName, bOverwriteExisting);
 	UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(AnimBPObj);
