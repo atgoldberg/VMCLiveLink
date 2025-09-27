@@ -11,6 +11,7 @@ class VRMINTERCHANGEEDITOR_API UVRMInterchangeSettings : public UDeveloperSettin
 public:
 	UVRMInterchangeSettings();
 
+    // Spring Bones ---------------------------------------------------------------
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="Parse and generate spring bone data assets during import."))
     bool bGenerateSpringBoneData = true;
 
@@ -23,13 +24,19 @@ public:
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, overwrite existing generated spring assets. If false, create with a suffix."))
     bool bOverwriteExistingSpringAssets = false;
 
-    // New: separate control for overwriting generated Post-Process AnimBlueprints
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, overwrite existing generated Post-Process AnimBlueprints. If false, create with a unique name."))
     bool bOverwriteExistingPostProcessABP = false;
 
-    // New: control whether to reuse an existing Post-Process ABP on re-import (preferred safe default)
     UPROPERTY(EditAnywhere, config, Category="Spring Bones", meta=(ToolTip="If true, attempt to reuse an existing Post-Process AnimBP when re-importing. If false, the importer will offer to overwrite or create a new ABP."))
     bool bReusePostProcessABPOnReimport = true;
+
+    // IK Rig ---------------------------------------------------------------------
+    UPROPERTY(EditAnywhere, config, Category="IK Rig", meta=(ToolTip="Generate an IK Rig (UIKRigDefinition) from a template for each imported character."))
+    bool bGenerateIKRigAssets = true;
+
+    // Live Link / Character Scaffold --------------------------------------------
+    UPROPERTY(EditAnywhere, config, Category="Live Link", meta=(DisplayName="Generate Live Link Actor Scaffold", ToolTip="Generate a Live Link enabled Character Actor BP + AnimBP scaffold inside <Character>/LiveLink/."))
+    bool bGenerateLiveLinkEnabledActor = true;
 
     virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 };

@@ -16,9 +16,42 @@ public:
     UPROPERTY(EditAnywhere, Category="Spring Bones", meta=(ShowOnlyInnerProperties))
     FVRMSpringConfig SpringConfig;
 
+    // IMPROVED: Add node index to bone name mapping for proper VRM compliance
+    // This should be populated during VRM import to maintain proper mapping from glTF node indices to UE bone names
+    UPROPERTY(VisibleAnywhere, Category="Spring Bones", meta=(ToolTip="Mapping from VRM/glTF node indices to Unreal bone names"))
+    TMap<int32, FName> NodeToBoneMap;
+
+    // Original source hash derived from imported file contents
     UPROPERTY(VisibleAnywhere, Category="Spring Bones")
     FString SourceHash;
 
     UPROPERTY(VisibleAnywhere, Category="Spring Bones")
     FString SourceFilename;
+
+    // Bumped when a user edits high-level tunables so the anim node rebuilds (appended to SourceHash logic)
+    UPROPERTY(VisibleAnywhere, Category="Spring Bones")
+    int32 EditRevision = 0;
+
+#if WITH_EDITOR
+    virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+    // Utility to get a combined dynamic hash used by runtime to detect changes
+    FString GetEffectiveHash() const { return SourceHash + TEXT("_") + FString::FromInt(EditRevision); }
+    
+    // IMPROVED: Helper function to resolve bone name from VRM node index
+    FName GetBoneNameForNode(int32 NodeIndex) const
+    {
+        if (const FName* BoneName = NodeToBoneMap.Find(NodeIndex))
+        {
+            return *BoneName;
+        }
+        return NAME_None;
+    }
+    
+    // Helper to set node to bone mapping (should be called during VRM import)
+    void SetNodeToBoneMapping(const TMap<int32, FName>& InNodeToBoneMap)
+    {
+        NodeToBoneMap = InNodeToBoneMap;
+    }
 };
