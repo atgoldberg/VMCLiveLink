@@ -299,12 +299,25 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
 bool UVRMSpringBonesPostImportPipeline::ParseAndFillDataAssetFromFile(const FString& Filename, UVRMSpringBoneData* Dest) const
 {
     if (!Dest) return false;
-    FVRMSpringConfig Config; FString Err;
-    if (!VRM::ParseSpringBonesFromFile(Filename, Config, Err))
+    FVRMSpringConfig Config; 
+    FString Err;
+    TMap<int32, FName> NodeMap; // New: capture node index -> bone name mapping
+    // Prefer new overload that also returns node map (falls back internally if unavailable)
+    bool bParsed = false;
+    if (VRM::ParseSpringBonesFromFile(Filename, Config, NodeMap, Err))
+    {
+        bParsed = true;
+    }
+    else if (VRM::ParseSpringBonesFromFile(Filename, Config, Err)) // fallback to legacy signature for safety
+    {
+        bParsed = true;
+    }
+    if (!bParsed)
     {
         return false;
     }
     Dest->SpringConfig = MoveTemp(Config);
+    if (NodeMap.Num() > 0) { Dest->SetNodeToBoneMapping(NodeMap); }
     return Dest->SpringConfig.IsValid();
 }
 

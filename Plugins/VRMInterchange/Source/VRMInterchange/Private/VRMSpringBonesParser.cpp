@@ -695,4 +695,47 @@ namespace VRM
     {
         FString Json; if (!ExtractTopLevelJsonString(Filename, Json)) { OutError = TEXT("Could not extract top-level JSON from file."); return false; } return ParseSpringBonesFromJson(Json, OutConfig, OutError);
     }
+
+    bool ParseSpringBonesFromJson(const FString& Json, FVRMSpringConfig& OutConfig, TMap<int32, FName>& OutNodeMap, FString& OutError)
+    {
+        OutNodeMap.Reset();
+        if (!ParseSpringBonesFromJson(Json, OutConfig, OutError))
+        {
+            return false;
+        }
+        // Extract node names for mapping
+        TSharedPtr<FJsonObject> Root; const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+        if (FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid())
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Nodes = nullptr;
+            if (Root->TryGetArrayField(TEXT("nodes"), Nodes) && Nodes)
+            {
+                for (int32 i = 0; i < Nodes->Num(); ++i)
+                {
+                    const TSharedPtr<FJsonValue>& V = (*Nodes)[i];
+                    const TSharedPtr<FJsonObject>* NObj = nullptr;
+                    if (V.IsValid() && V->TryGetObject(NObj) && NObj && NObj->IsValid())
+                    {
+                        FString NameStr;
+                        if ((*NObj)->TryGetStringField(TEXT("name"), NameStr) && !NameStr.IsEmpty())
+                        {
+                            OutNodeMap.Add(i, FName(*NameStr));
+                        }
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    bool ParseSpringBonesFromFile(const FString& Filename, FVRMSpringConfig& OutConfig, TMap<int32, FName>& OutNodeMap, FString& OutError)
+    {
+        FString Json;
+        if (!ExtractTopLevelJsonString(Filename, Json))
+        {
+            OutError = TEXT("Could not extract top-level JSON from file.");
+            return false;
+        }
+        return ParseSpringBonesFromJson(Json, OutConfig, OutNodeMap, OutError);
+    }
 }
