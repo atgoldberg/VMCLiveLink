@@ -3,6 +3,15 @@
 #include "AnimationRuntime.h"
 #include "VRMInterchangeLog.h"
 
+static FORCEINLINE FVector ClosestPointOnSegment(const FVector& A, const FVector& B, const FVector& P)
+{
+    const FVector AB = B - A;
+    const float LenSqr = AB.SizeSquared();
+    if (LenSqr <= KINDA_SMALL_NUMBER) return A;
+    const float T = FMath::Clamp(FVector::DotProduct(P - A, AB) / LenSqr, 0.f, 1.f);
+    return A + AB * T;
+}
+
 void FAnimNode_VRMSpringBone::Initialize_AnyThread(const FAnimationInitializeContext& Context)
 {
     FAnimNode_Base::Initialize_AnyThread(Context);
@@ -111,7 +120,6 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
     CSPose.InitPose(Output.Pose);
     const FBoneContainer& BoneContainer = Output.Pose.GetBoneContainer();
 
-    // Manually accumulate component-space transforms using proper API (operator[] not supported on FCSPose)
     const TArray<FBoneIndexType>& BoneIndices = BoneContainer.GetBoneIndicesArray();
     for (FBoneIndexType BoneIndex : BoneIndices)
     {
@@ -129,23 +137,129 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
         }
     }
 
+    // Task 07: Prepare world-space collider caches (no realloc).
+    SphereWorldPos.SetNum(SphereShapeCaches.Num(), /*bAllowShrinking*/false);
+    CapsuleWorldP0.SetNum(CapsuleShapeCaches.Num(), false);
+    CapsuleWorldP1.SetNum(CapsuleShapeCaches.Num(), false);
+
+    for (int32 i=0; i<SphereShapeCaches.Num(); ++i)
+    {
+        const FVRMSBSphereShapeCache& SC = SphereShapeCaches[i];
+        if (!SC.bValid || !SC.BoneIndex.IsValid())
+        {
+            SphereWorldPos[i] = FVector::ZeroVector;
+            continue;
+        }
+        const FTransform& BoneCST = CSPose.GetComponentSpaceTransform(SC.BoneIndex);
+        SphereWorldPos[i] = BoneCST.TransformPosition(SC.LocalOffset);
+    }
+    for (int32 i=0; i<CapsuleShapeCaches.Num(); ++i)
+    {
+        const FVRMSBCapsuleShapeCache& CC = CapsuleShapeCaches[i];
+        if (!CC.bValid || !CC.BoneIndex.IsValid())
+        {
+            CapsuleWorldP0[i] = CapsuleWorldP1[i] = FVector::ZeroVector;
+            continue;
+        }
+        const FTransform& BoneCST = CSPose.GetComponentSpaceTransform(CC.BoneIndex);
+        CapsuleWorldP0[i] = BoneCST.TransformPosition(CC.LocalP0);
+        CapsuleWorldP1[i] = BoneCST.TransformPosition(CC.LocalP1);
+    }
+
+    // Collision resolve helper lambdas.
+    auto ResolveSphere = [](const FVector& Center, float Radius, bool bInside, FVector& Tip, float TipRadius)
+    {
+        const float Combined = Radius + TipRadius;
+        const FVector ToTip = Tip - Center;
+        const float DistSqr = ToTip.SizeSquared();
+        if (DistSqr < KINDA_SMALL_NUMBER)
+        {
+            const FVector Dir = FVector::UpVector;
+            Tip = Center + Dir * (bInside? Combined * 0.99f : Combined + 0.1f);
+            return;
+        }
+        const float Dist = FMath::Sqrt(DistSqr);
+        if (!bInside)
+        {
+            if (Dist < Combined)
+            {
+                const float Pen = Combined - Dist;
+                const FVector N = ToTip / Dist;
+                Tip += N * Pen;
+            }
+        }
+        else
+        {
+            const float Inner = FMath::Max(0.f, Radius - TipRadius);
+            if (Dist > Inner)
+            {
+                const float Pen = Dist - Inner;
+                const FVector N = ToTip / Dist;
+                Tip -= N * Pen;
+            }
+        }
+    };
+
+    auto ResolveCapsule = [](const FVector& A, const FVector& B, float Radius, bool bInside, FVector& Tip, float TipRadius)
+    {
+        const float Combined = Radius + TipRadius;
+        const FVector Closest = ClosestPointOnSegment(A, B, Tip);
+        const FVector ToTip = Tip - Closest;
+        const float DistSqr = ToTip.SizeSquared();
+        if (DistSqr < KINDA_SMALL_NUMBER)
+        {
+            FVector Axis = (B - A).GetSafeNormal();
+            if (Axis.IsNearlyZero()) Axis = FVector::UpVector;
+            FVector Perp = FVector::CrossProduct(Axis, FVector::RightVector);
+            if (Perp.IsNearlyZero()) Perp = FVector::UpVector;
+            Perp = Perp.GetSafeNormal();
+            Tip = Closest + Perp * (bInside? Combined * 0.99f : Combined + 0.1f);
+            return;
+        }
+        const float Dist = FMath::Sqrt(DistSqr);
+        if (!bInside)
+        {
+            if (Dist < Combined)
+            {
+                const float Pen = Combined - Dist;
+                const FVector N = ToTip / Dist;
+                Tip += N * Pen;
+            }
+        }
+        else
+        {
+            const float Inner = FMath::Max(0.f, Radius - TipRadius);
+            if (Dist > Inner)
+            {
+                const float Pen = Dist - Inner;
+                const FVector N = ToTip / Dist;
+                Tip -= N * Pen;
+            }
+        }
+    };
+
     for (FVRMSBChainCache& Chain : ChainCaches)
     {
         if (Chain.Joints.Num() == 0) continue;
+        const FVector ExternalGravity = Chain.GravityDir * Chain.GravityPower; // per-frame magnitude (authoring intent at 60fps)
 
-        // External gravity (constant per chain per frame)
-        const FVector ExternalGravity = Chain.GravityDir * Chain.GravityPower;
-
-        // --- Task 06 Root->Leaf propagation per sub-step ---
         for (int32 Step = 0; Step < CachedSubsteps; ++Step)
         {
+            // Frame-rate invariant scaling factor relative to 60Hz authoring assumptions.
+            const float s = CachedH * 60.f; // fraction of a 60Hz frame this sub-step represents
+            // Precompute scaling factors once per sub-step for this chain.
+            const float DragClamped = FMath::Clamp(Chain.Drag, 0.f, 1.f);
+            const float StiffClamped = FMath::Clamp(Chain.Stiffness, 0.f, 1.f);
+            const float VelKeep = FMath::Pow(FMath::Clamp(1.f - DragClamped, 0.f, 1.f), s); // (1-Drag)^(s)
+            const float StiffAlpha = 1.f - FMath::Pow(FMath::Clamp(1.f - StiffClamped, 0.f, 1.f), s); // 1 - (1-Stiffness)^s
+            const FVector GravityDisplacement = ExternalGravity * s; // gravity power scaled to sub-step fraction
+
             for (int32 j = 0; j < Chain.Joints.Num(); ++j)
             {
                 FVRMSBJointCache& JC = Chain.Joints[j];
                 if (!JC.bValid) continue;
-                if (JC.RestLength <= KINDA_SMALL_NUMBER) continue; // leaf placeholder (no tail)
+                if (JC.RestLength <= KINDA_SMALL_NUMBER) continue; // leaf placeholder
 
-                // Joint (Head) current animated transform
                 const FCompactPoseBoneIndex HeadCPIndex = JC.BoneIndex;
                 FQuat HeadWorldRot = FQuat::Identity;
                 FVector HeadWorldPos = JC.ParentRefPos; // fallback
@@ -156,7 +270,6 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
                     HeadWorldRot = HeadCST.GetRotation();
                 }
 
-                // Parent world rotation (animated) for rest direction reconstruction
                 FQuat ParentWorldRot = FQuat::Identity;
                 if (HeadCPIndex.IsValid())
                 {
@@ -167,15 +280,10 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
                     }
                 }
 
-                // Rest direction in component space from current animated parent orientation
                 FVector RestDirCS = ParentWorldRot.RotateVector(JC.InitialLocalRotation.RotateVector(JC.BoneAxisLocal));
-                if (RestDirCS.IsNearlyZero())
-                {
-                    RestDirCS = JC.RestDirection; // fallback to cached ref pose direction
-                }
+                if (RestDirCS.IsNearlyZero()) RestDirCS = JC.RestDirection;
                 RestDirCS = RestDirCS.GetSafeNormal();
 
-                // Anchor: root joint uses its animated head position; descendants use previous joint's simulated tip
                 FVector AnchorPos;
                 if (j == 0)
                 {
@@ -185,37 +293,49 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
                 {
                     const FVRMSBJointCache& PrevJC = Chain.Joints[j-1];
                     if (PrevJC.bValid && PrevJC.RestLength > KINDA_SMALL_NUMBER)
-                    {
-                        AnchorPos = PrevJC.CurrTip; // simulated propagation
-                    }
+                        AnchorPos = PrevJC.CurrTip;
                     else
-                    {
-                        AnchorPos = HeadWorldPos; // fallback if parent not valid for simulation
-                    }
+                        AnchorPos = HeadWorldPos;
                 }
 
-                // Inertia (Verlet implicit velocity) with drag
-                const FVector Velocity = (JC.CurrTip - JC.PrevTip);
-                const FVector Inertia = Velocity * (1.0f - Chain.Drag);
+                // Velocity & inertia with frame-rate invariant damping.
+                const FVector Velocity = JC.CurrTip - JC.PrevTip;
+                FVector NextTip = JC.CurrTip + Velocity * VelKeep; // inertia contribution
 
-                // Stiffness additive force (spec form): h * restDir * stiffness
-                const FVector StiffnessForce = RestDirCS * (Chain.Stiffness * CachedH);
+                // Gravity displacement (frame-rate invariant).
+                NextTip += GravityDisplacement;
 
-                // External gravity force (spec): h * gravityDir * gravityPower
-                const FVector GravityForce = ExternalGravity * CachedH;
+                // Positional stiffness blend toward rest target maintaining rest length direction.
+                const FVector TargetTip = AnchorPos + RestDirCS * JC.RestLength;
+                NextTip = FMath::Lerp(NextTip, TargetTip, StiffAlpha);
 
-                FVector NextTip = JC.CurrTip + Inertia + StiffnessForce + GravityForce;
-
-                // Length constraint back to fixed distance from anchor
-                const FVector ToNext = NextTip - AnchorPos;
-                const float Dist = ToNext.Size();
-                if (Dist > SMALL_NUMBER)
+                // --- Collisions (sphere then capsule) ---
+                const float TipRadius = JC.HitRadius;
+                for (int32 SphereIdx : Chain.SphereShapeIndices)
                 {
-                    NextTip = AnchorPos + (ToNext / Dist) * JC.RestLength;
+                    if (!SphereShapeCaches.IsValidIndex(SphereIdx)) continue;
+                    const FVRMSBSphereShapeCache& SC = SphereShapeCaches[SphereIdx];
+                    if (!SC.bValid) continue;
+                    ResolveSphere(SphereWorldPos.IsValidIndex(SphereIdx) ? SphereWorldPos[SphereIdx] : FVector::ZeroVector, SC.Radius, SC.bInside, NextTip, TipRadius);
                 }
-                else
+                for (int32 CapsuleIdx : Chain.CapsuleShapeIndices)
                 {
-                    NextTip = AnchorPos + RestDirCS * JC.RestLength;
+                    if (!CapsuleShapeCaches.IsValidIndex(CapsuleIdx)) continue;
+                    const FVRMSBCapsuleShapeCache& CC = CapsuleShapeCaches[CapsuleIdx];
+                    if (!CC.bValid) continue;
+                    ResolveCapsule(CapsuleWorldP0.IsValidIndex(CapsuleIdx)?CapsuleWorldP0[CapsuleIdx]:FVector::ZeroVector,
+                                   CapsuleWorldP1.IsValidIndex(CapsuleIdx)?CapsuleWorldP1[CapsuleIdx]:FVector::ZeroVector,
+                                   CC.Radius, CC.bInside, NextTip, TipRadius);
+                }
+
+                // Final authoritative length clamp after collisions (maintain invariant segment length).
+                {
+                    const FVector Dir = NextTip - AnchorPos;
+                    const float Dist = Dir.Size();
+                    if (Dist > SMALL_NUMBER)
+                        NextTip = AnchorPos + Dir / Dist * JC.RestLength;
+                    else
+                        NextTip = AnchorPos + RestDirCS * JC.RestLength;
                 }
 
                 JC.PrevTip = JC.CurrTip;
@@ -228,7 +348,7 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
     if (LastLoggedFrame != FrameCounter)
     {
         LastLoggedFrame = FrameCounter;
-        UE_LOG(LogVRMSpring, VeryVerbose, TEXT("[VRMSpring][Task06] Simulated frame=%llu Springs=%d Joints=%d (Root->Leaf propagation)"), FrameCounter, ChainCaches.Num(), TotalValidJoints);
+        UE_LOG(LogVRMSpring, VeryVerbose, TEXT("[VRMSpring][Task07+Compat] Simulated frame=%llu Springs=%d Joints=%d (Collisions & VRM param scaling)"), FrameCounter, ChainCaches.Num(), TotalValidJoints);
     }
 #endif
 }
@@ -248,6 +368,9 @@ void FAnimNode_VRMSpringBone::InvalidateCaches()
     LastAssetPtr.Reset();
     TotalValidJoints = 0;
     bCachesValid = false;
+    SphereWorldPos.Reset();
+    CapsuleWorldP0.Reset();
+    CapsuleWorldP1.Reset();
 }
 
 FCompactPoseBoneIndex FAnimNode_VRMSpringBone::ResolveBone(const FBoneContainer& BoneContainer, const FName& BoneName) const
@@ -314,12 +437,12 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
 
         for (const FVRMSpringColliderSphere& Sphere : Collider.Spheres)
         {
-            int32 GlobalIdx = SphereShapeCaches.Add(FVRMSBSphereShapeCache{BoneIndex, BoneName, Sphere.Offset, Sphere.Radius, BoneIndex.IsValid() && Sphere.Radius > 0.f});
+            int32 GlobalIdx = SphereShapeCaches.Add(FVRMSBSphereShapeCache{BoneIndex, BoneName, Sphere.Offset, Sphere.Radius, Sphere.bInside, BoneIndex.IsValid() && Sphere.Radius > 0.f});
             Map.Spheres.Add(GlobalIdx);
         }
         for (const FVRMSpringColliderCapsule& Capsule : Collider.Capsules)
         {
-            int32 GlobalIdx = CapsuleShapeCaches.Add(FVRMSBCapsuleShapeCache{BoneIndex, BoneName, Capsule.Offset, Capsule.TailOffset, Capsule.Radius, BoneIndex.IsValid() && Capsule.Radius > 0.f});
+            int32 GlobalIdx = CapsuleShapeCaches.Add(FVRMSBCapsuleShapeCache{BoneIndex, BoneName, Capsule.Offset, Capsule.TailOffset, Capsule.Radius, Capsule.bInside, BoneIndex.IsValid() && Capsule.Radius > 0.f});
             Map.Capsules.Add(GlobalIdx);
         }
     }
@@ -327,7 +450,6 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
     TotalValidJoints = 0;
     ChainCaches.SetNum(Data.Springs.Num());
 
-    // Reference pose transforms (component space)
     const TArray<FTransform>& LocalRefPose = RefSkeleton.GetRefBonePose();
     TArray<FTransform> ComponentRefPose; ComponentRefPose.SetNum(RefSkeleton.GetNum());
     for (int32 i=0; i<RefSkeleton.GetNum(); ++i)
@@ -343,7 +465,6 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
         }
     }
 
-    // Helper lambda to test ancestry (spec: joints must be ancestor-descendant order)
     auto IsAncestor = [&RefSkeleton](int32 AncestorIdx, int32 DescIdx)->bool
     {
         if (AncestorIdx == INDEX_NONE || DescIdx == INDEX_NONE) return false;
@@ -366,7 +487,6 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
         Chain.Stiffness = FMath::Max(0.f, Spring.Stiffness);
         Chain.Drag = FMath::Clamp(Spring.Drag, 0.f, 1.f);
 
-        // Colliders via groups
         for (int32 GroupIdx : Spring.ColliderGroupIndices)
         {
             if (!Data.ColliderGroups.IsValidIndex(GroupIdx)) continue;
@@ -395,20 +515,19 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
             Chain.Joints.Add(JC);
         }
 
-        // Rest lengths & local axis init
         for (int32 j=0; j < Chain.Joints.Num(); ++j)
         {
             FVRMSBJointCache& JC = Chain.Joints[j];
             if (!JC.bValid) continue;
             const int32 RefIndex = RefSkeleton.FindBoneIndex(JC.BoneName);
-            const int32 ParentRefIndex = RefIndex; // parent pointer in this context is this bone; tail is child or virtual end
+            const int32 ParentRefIndex = RefIndex;
 
             FVector ParentPos = FVector::ZeroVector;
             if (ComponentRefPose.IsValidIndex(ParentRefIndex))
             {
                 ParentPos = ComponentRefPose[ParentRefIndex].GetLocation();
             }
-            JC.ParentRefPos = ParentPos; // reference parent pos
+            JC.ParentRefPos = ParentPos;
 
             JC.InitialLocalTransform = LocalRefPose.IsValidIndex(RefIndex) ? LocalRefPose[RefIndex] : FTransform::Identity;
             JC.InitialLocalRotation = JC.InitialLocalTransform.GetRotation();
@@ -455,7 +574,6 @@ void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& Bone
             }
         }
 
-        // Simple ancestor validation: ensure each successive valid joint is descendant of previous
         for (int32 j=0; j+1<Chain.Joints.Num(); ++j)
         {
             const FVRMSBJointCache& A = Chain.Joints[j];
