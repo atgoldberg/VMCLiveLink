@@ -9,21 +9,18 @@
 struct FVRMSBJointCache
 {
     FVRMSBJointCache() : BoneIndex(FCompactPoseBoneIndex(INDEX_NONE)) {}
-    FCompactPoseBoneIndex BoneIndex; // compact pose index
-    FName BoneName;                  // cached bone name for ref skeleton lookup
+    FCompactPoseBoneIndex BoneIndex; 
+    FName BoneName;                  
     float HitRadius = 0.f;
-    float RestLength = 0.f;          // component-space rest length to child
-    FVector RestDirection = FVector::ZeroVector; // component-space rest direction to child
-    FVector PrevTip = FVector::ZeroVector;       // previous tail position (component space)
-    FVector CurrTip = FVector::ZeroVector;       // current tail position (component space)
-    FVector ParentRefPos = FVector::ZeroVector;  // reference parent position in component space
-
-    // Added for future rotation write-back & spec compliance (Tasks 2 groundwork)
-    FQuat InitialLocalRotation = FQuat::Identity;          // joint's initial local rotation
-    FTransform InitialLocalTransform;                     // full initial local transform
-    FVector BoneAxisLocal = FVector::ForwardVector;       // direction to child in joint local space
-    float BoneLengthLocal = 0.f;                          // length to child in joint local space
-
+    float RestLength = 0.f;          
+    FVector RestDirection = FVector::ZeroVector; 
+    FVector PrevTip = FVector::ZeroVector;       
+    FVector CurrTip = FVector::ZeroVector;       
+    FVector ParentRefPos = FVector::ZeroVector;  
+    FQuat InitialLocalRotation = FQuat::Identity;          
+    FTransform InitialLocalTransform;                      
+    FVector BoneAxisLocal = FVector::ForwardVector;        
+    float BoneLengthLocal = 0.f;                           
     bool bValid = false;
 };
 
@@ -34,14 +31,13 @@ struct FVRMSBChainCache
     float GravityPower = 0.f;
     float Stiffness = 0.f;
     float Drag = 0.f;
+    FCompactPoseBoneIndex CenterBoneIndex = FCompactPoseBoneIndex(INDEX_NONE);
+    FName CenterBoneName;
+    bool bHasCenter = false; 
     TArray<FVRMSBJointCache> Joints;
     TArray<int32> SphereShapeIndices;
     TArray<int32> CapsuleShapeIndices;
-    void Reset()
-    {
-        SpringIndex = INDEX_NONE; GravityDir = FVector(0,0,-1); GravityPower = 0.f; Stiffness = 0.f; Drag = 0.f;
-        Joints.Reset(); SphereShapeIndices.Reset(); CapsuleShapeIndices.Reset();
-    }
+    TArray<int32> PlaneShapeIndices; 
 };
 
 struct FVRMSBSphereShapeCache
@@ -50,7 +46,7 @@ struct FVRMSBSphereShapeCache
     FName BoneName;
     FVector LocalOffset = FVector::ZeroVector;
     float Radius = 0.f;
-    bool bInside = false; // Task 07: inside/outside semantics from asset
+    bool bInside = false; 
     bool bValid = false;
 };
 
@@ -61,7 +57,16 @@ struct FVRMSBCapsuleShapeCache
     FVector LocalP0 = FVector::ZeroVector;
     FVector LocalP1 = FVector::ZeroVector;
     float Radius = 0.f;
-    bool bInside = false; // Task 07
+    bool bInside = false; 
+    bool bValid = false;
+};
+
+struct FVRMSBPlaneShapeCache
+{
+    FCompactPoseBoneIndex BoneIndex;
+    FName BoneName;
+    FVector LocalPoint = FVector::ZeroVector; 
+    FVector LocalNormal = FVector(0,0,1);     
     bool bValid = false;
 };
 
@@ -76,26 +81,29 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring", meta=(PinShownByDefault, DisplayName="Spring Data"))
     UVRMSpringBoneData* SpringConfig = nullptr;
 
-    // --- Task 3: Deterministic Sub-Stepping Controls ---
-    // If true, accumulate time and simulate in fixed-size steps (FixedTimeStep) up to MaxSubsteps per frame.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Blend", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float Weight = 1.f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation")
     bool bUseFixedTimeStep = true;
 
-    // Fixed simulation step (seconds) when bUseFixedTimeStep. Typical 1/60.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation", meta=(EditCondition="bUseFixedTimeStep", ClampMin="0.0001", UIMin="0.001", UIMax="0.033"))
     float FixedTimeStep = 1.f / 60.f;
 
-    // Maximum number of fixed substeps processed per frame (prevents spiraling when frame rate is low).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation", meta=(ClampMin="1", ClampMax="32"))
     int32 MaxSubsteps = 8;
 
-    // Clamp excessively large delta times (e.g., hitch frames) to maintain stability.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation", meta=(ClampMin="0.001", UIMin="0.016", UIMax="0.25"))
     float MaxDeltaTime = 0.1f;
 
-    // If not using fixed timestep, this many substeps are used per frame (variable size = DeltaTime / Substeps)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation", meta=(EditCondition="!bUseFixedTimeStep", ClampMin="1", ClampMax="32"))
     int32 VariableSubsteps = 1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Simulation", meta=(ClampMin="1", ClampMax="4"))
+    int32 ConstraintIterations = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Advanced", meta=(ClampMin="0.0", UIMin="0.0", UIMax="5.0"))
+    float RotationDeadZoneDeg = 0.5f;
 
     virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
     virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
@@ -105,32 +113,38 @@ public:
 private:
     void InvalidateCaches();
     void RebuildCaches_AnyThread(const FBoneContainer& BoneContainer);
-
     FCompactPoseBoneIndex ResolveBone(const FBoneContainer& BoneContainer, const FName& BoneName) const;
     FCompactPoseBoneIndex ResolveBoneByNodeIndex(const FBoneContainer& BoneContainer, int32 NodeIndex) const;
+    void BuildComponentSpacePose(const FPoseContext& SourcePose, FCSPose<FCompactPose>& OutCSPose) const;
+    // Non-const pose references (UE method GetComponentSpaceTransform is non-const)
+    void PrepareColliderWorldCaches(FCSPose<FCompactPose>& CSPose);
+    void SimulateChains(const FBoneContainer& BoneContainer, FCSPose<FCompactPose>& CSPose);
+    void ApplyRotations(FPoseContext& Output, FCSPose<FCompactPose>& CSPose);
 
     TArray<FVRMSBChainCache> ChainCaches;
     TArray<FVRMSBSphereShapeCache> SphereShapeCaches;
     TArray<FVRMSBCapsuleShapeCache> CapsuleShapeCaches;
+    TArray<FVRMSBPlaneShapeCache> PlaneShapeCaches;
 
     FString LastAssetHash;
     TWeakObjectPtr<UVRMSpringBoneData> LastAssetPtr;
     bool bCachesValid = false;
 
-    int32 TotalValidJoints = 0;
-
+    int32 TotalValidJoints = 0; 
     uint64 LastLoggedFrame = 0;
-
-    // Cached deterministic stepping params produced in Update_AnyThread and consumed in Evaluate_AnyThread
+    uint64 LastStepLoggedFrame = 0; 
     int32 CachedSubsteps = 1;
     float CachedH = 1.0f / 60.0f;
     uint64 LastSimulatedFrame = 0;
-
-    // Time accumulator for fixed timestep mode (Task 3)
     float TimeAccumulator = 0.f;
 
-    // Task 07: per-frame world-space collider caches (no allocation churn)
-    TArray<FVector> SphereWorldPos;      // size == SphereShapeCaches
-    TArray<FVector> CapsuleWorldP0;      // size == CapsuleShapeCaches
-    TArray<FVector> CapsuleWorldP1;      // size == CapsuleShapeCaches
+    TArray<FVector> SphereWorldPos;
+    TArray<FVector> CapsuleWorldP0;
+    TArray<FVector> CapsuleWorldP1;
+    TArray<FVector> PlaneWorldPoint;
+    TArray<FVector> PlaneWorldNormal;
+
+    bool bLimitsEnabled = false;
+    bool bElasticityEnabled = false; 
+    bool bWasWeightActive = true; 
 };

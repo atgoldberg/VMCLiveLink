@@ -84,22 +84,41 @@ namespace
     // Others use { "shape": { "sphere": {..} } } or { "shape": { "capsule": {..} } }
     static void ParseOneShapeObject(const TSharedPtr<FJsonObject>& ShapeEntry,
                                     TArray<FVRMSpringColliderSphere>& OutSpheres,
-                                    TArray<FVRMSpringColliderCapsule>& OutCapsules)
+                                    TArray<FVRMSpringColliderCapsule>& OutCapsules,
+                                    TArray<FVRMSpringColliderPlane>& OutPlanes)
     {
         if (!ShapeEntry.IsValid()) return;
 
-        auto ParseFromContainer = [&OutSpheres, &OutCapsules](const TSharedPtr<FJsonObject>& Container)
+        auto ParseFromContainer = [&OutSpheres, &OutCapsules, &OutPlanes](const TSharedPtr<FJsonObject>& Container)
         {
             if (!Container.IsValid()) return;
             const TSharedPtr<FJsonObject>* Sphere = nullptr;
             if (Container->TryGetObjectField(TEXT("sphere"), Sphere) && Sphere && Sphere->IsValid())
             {
-                FVRMSpringColliderSphere S; S.Offset = ReadVec3(*Sphere, TEXT("offset")); (*Sphere)->TryGetNumberField(TEXT("radius"), S.Radius); OutSpheres.Add(S);
+                FVRMSpringColliderSphere S; 
+                S.Offset = ReadVec3(*Sphere, TEXT("offset")); 
+                (*Sphere)->TryGetNumberField(TEXT("radius"), S.Radius); 
+                if ((*Sphere)->HasTypedField<EJson::Boolean>(TEXT("inside"))) { S.bInside = (*Sphere)->GetBoolField(TEXT("inside")); }
+                OutSpheres.Add(S);
             }
             const TSharedPtr<FJsonObject>* Capsule = nullptr;
             if (Container->TryGetObjectField(TEXT("capsule"), Capsule) && Capsule && Capsule->IsValid())
             {
-                FVRMSpringColliderCapsule C; C.Offset = ReadVec3(*Capsule, TEXT("offset")); C.TailOffset = ReadVec3(*Capsule, TEXT("tail")); (*Capsule)->TryGetNumberField(TEXT("radius"), C.Radius); OutCapsules.Add(C);
+                FVRMSpringColliderCapsule C; 
+                C.Offset = ReadVec3(*Capsule, TEXT("offset")); 
+                C.TailOffset = ReadVec3(*Capsule, TEXT("tail")); 
+                (*Capsule)->TryGetNumberField(TEXT("radius"), C.Radius); 
+                if ((*Capsule)->HasTypedField<EJson::Boolean>(TEXT("inside"))) { C.bInside = (*Capsule)->GetBoolField(TEXT("inside")); }
+                OutCapsules.Add(C);
+            }
+            const TSharedPtr<FJsonObject>* Plane = nullptr;
+            if (Container->TryGetObjectField(TEXT("plane"), Plane) && Plane && Plane->IsValid())
+            {
+                FVRMSpringColliderPlane P; 
+                P.Offset = ReadVec3(*Plane, TEXT("offset"));
+                P.Normal = ReadVec3(*Plane, TEXT("normal"), FVector(0,0,1));
+                if (!P.Normal.IsNearlyZero()) P.Normal = P.Normal.GetSafeNormal();
+                OutPlanes.Add(P);
             }
         };
 
@@ -113,19 +132,50 @@ namespace
             ParseFromContainer(*Wrapped);
         }
 
-        // Some previews of the spec used { "type":"sphere", ... }
+        // Extended collider extension path: extensions.VRMC_springBone_extended_collider.shape
+        const TSharedPtr<FJsonObject>* Exts = nullptr;
+        if (ShapeEntry->TryGetObjectField(TEXT("extensions"), Exts) && Exts && Exts->IsValid())
+        {
+            const TSharedPtr<FJsonObject>* ExtCollider = nullptr;
+            if ((*Exts)->TryGetObjectField(TEXT("VRMC_springBone_extended_collider"), ExtCollider) && ExtCollider && ExtCollider->IsValid())
+            {
+                const TSharedPtr<FJsonObject>* ExtShape = nullptr;
+                if ((*ExtCollider)->TryGetObjectField(TEXT("shape"), ExtShape) && ExtShape && ExtShape->IsValid())
+                {
+                    ParseFromContainer(*ExtShape);
+                }
+            }
+        }
+
+        // Some previews of the spec used { "type":"sphere" ... }
         FString Type;
         if (ShapeEntry->TryGetStringField(TEXT("type"), Type))
         {
-            Type.TrimStartAndEndInline();
-            Type.ToLowerInline();
+            Type.TrimStartAndEndInline(); Type.ToLowerInline();
             if (Type == TEXT("sphere"))
             {
-                FVRMSpringColliderSphere S; S.Offset = ReadVec3(ShapeEntry, TEXT("offset")); ShapeEntry->TryGetNumberField(TEXT("radius"), S.Radius); OutSpheres.Add(S);
+                FVRMSpringColliderSphere SphereTemp; 
+                SphereTemp.Offset = ReadVec3(ShapeEntry, TEXT("offset")); 
+                ShapeEntry->TryGetNumberField(TEXT("radius"), SphereTemp.Radius); 
+                if (ShapeEntry->HasTypedField<EJson::Boolean>(TEXT("inside"))) { SphereTemp.bInside = ShapeEntry->GetBoolField(TEXT("inside")); }
+                OutSpheres.Add(SphereTemp);
             }
             else if (Type == TEXT("capsule"))
             {
-                FVRMSpringColliderCapsule C; C.Offset = ReadVec3(ShapeEntry, TEXT("offset")); C.TailOffset = ReadVec3(ShapeEntry, TEXT("tail")); ShapeEntry->TryGetNumberField(TEXT("radius"), C.Radius); OutCapsules.Add(C);
+                FVRMSpringColliderCapsule CapsuleTemp; 
+                CapsuleTemp.Offset = ReadVec3(ShapeEntry, TEXT("offset")); 
+                CapsuleTemp.TailOffset = ReadVec3(ShapeEntry, TEXT("tail")); 
+                ShapeEntry->TryGetNumberField(TEXT("radius"), CapsuleTemp.Radius); 
+                if (ShapeEntry->HasTypedField<EJson::Boolean>(TEXT("inside"))) { CapsuleTemp.bInside = ShapeEntry->GetBoolField(TEXT("inside")); }
+                OutCapsules.Add(CapsuleTemp);
+            }
+            else if (Type == TEXT("plane"))
+            {
+                FVRMSpringColliderPlane PlaneTemp; 
+                PlaneTemp.Offset = ReadVec3(ShapeEntry, TEXT("offset"));
+                PlaneTemp.Normal = ReadVec3(ShapeEntry, TEXT("normal"), FVector(0,0,1));
+                if (!PlaneTemp.Normal.IsNearlyZero()) PlaneTemp.Normal = PlaneTemp.Normal.GetSafeNormal();
+                OutPlanes.Add(PlaneTemp);
             }
         }
     }
@@ -151,10 +201,12 @@ namespace
     // Some exporters store collider shapes on nodes rather than in VRMC_springBone.colliders.
     static void BuildNodeColliderShapeMap(const TSharedPtr<FJsonObject>& Root,
         TMap<int32, TArray<FVRMSpringColliderSphere>>& OutSpheres,
-        TMap<int32, TArray<FVRMSpringColliderCapsule>>& OutCapsules)
+        TMap<int32, TArray<FVRMSpringColliderCapsule>>& OutCapsules,
+        TMap<int32, TArray<FVRMSpringColliderPlane>>& OutPlanes)
     {
         OutSpheres.Reset();
         OutCapsules.Reset();
+        OutPlanes.Reset();
 
         if (!Root.IsValid())
         {
@@ -163,7 +215,8 @@ namespace
 
         auto ParseShapesFromObj = [](const TSharedPtr<FJsonObject>& ShapesOwner,
                                      TArray<FVRMSpringColliderSphere>& Spheres,
-                                     TArray<FVRMSpringColliderCapsule>& Capsules)
+                                     TArray<FVRMSpringColliderCapsule>& Capsules,
+                                     TArray<FVRMSpringColliderPlane>& Planes)
         {
             const TArray<TSharedPtr<FJsonValue>>* Shapes = nullptr;
             if (ShapesOwner.IsValid() && ShapesOwner->TryGetArrayField(TEXT("shapes"), Shapes) && Shapes)
@@ -172,7 +225,7 @@ namespace
                 {
                     const TSharedPtr<FJsonObject>* SObj = nullptr;
                     if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
-                    ParseOneShapeObject(*SObj, Spheres, Capsules);
+                    ParseOneShapeObject(*SObj, Spheres, Capsules, Planes);
                 }
             }
         };
@@ -195,7 +248,8 @@ namespace
                         if (NodeIndex == INDEX_NONE) continue;
                         TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIndex);
                         TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIndex);
-                        ParseShapesFromObj(*CObj, SArr, CArr);
+                        TArray<FVRMSpringColliderPlane>& PArr = OutPlanes.FindOrAdd(NodeIndex);
+                        ParseShapesFromObj(*CObj, SArr, CArr, PArr);
                     }
                 }
             }
@@ -217,7 +271,6 @@ namespace
                 const TSharedPtr<FJsonObject>* NodeCol = nullptr;
                 if (!(*NExts)->TryGetObjectField(TEXT("VRMC_node_collider"), NodeCol) || !NodeCol || !NodeCol->IsValid()) continue;
 
-                // Prefer array form
                 const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
                 if ((*NodeCol)->TryGetArrayField(TEXT("colliders"), Colliders) && Colliders)
                 {
@@ -227,18 +280,19 @@ namespace
                         if (!CV.IsValid() || !CV->TryGetObject(CObj) || !CObj || !CObj->IsValid()) continue;
                         TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIdx);
                         TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIdx);
-                        ParseShapesFromObj(*CObj, SArr, CArr);
+                        TArray<FVRMSpringColliderPlane>& PArr = OutPlanes.FindOrAdd(NodeIdx);
+                        ParseShapesFromObj(*CObj, SArr, CArr, PArr);
                     }
                 }
                 else
                 {
-                    // Some exporters store a single object under 'collider' key
                     const TSharedPtr<FJsonObject>* Single = nullptr;
                     if ((*NodeCol)->TryGetObjectField(TEXT("collider"), Single) && Single && Single->IsValid())
                     {
                         TArray<FVRMSpringColliderSphere>& SArr = OutSpheres.FindOrAdd(NodeIdx);
                         TArray<FVRMSpringColliderCapsule>& CArr = OutCapsules.FindOrAdd(NodeIdx);
-                        ParseShapesFromObj(*Single, SArr, CArr);
+                        TArray<FVRMSpringColliderPlane>& PArr = OutPlanes.FindOrAdd(NodeIdx);
+                        ParseShapesFromObj(*Single, SArr, CArr, PArr);
                     }
                 }
             }
@@ -267,7 +321,8 @@ namespace
         // Fallback map for shapes that may live under VRMC_node_collider
         TMap<int32, TArray<FVRMSpringColliderSphere>> NodeSpheres;
         TMap<int32, TArray<FVRMSpringColliderCapsule>> NodeCapsules;
-        BuildNodeColliderShapeMap(Root, NodeSpheres, NodeCapsules);
+        TMap<int32, TArray<FVRMSpringColliderPlane>> NodePlanes;
+        BuildNodeColliderShapeMap(Root, NodeSpheres, NodeCapsules, NodePlanes);
 
         // colliders
         const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
@@ -291,23 +346,21 @@ namespace
                         const TSharedPtr<FJsonObject>* SObj = nullptr;
                         if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
 
-                        // Accept multiple schema variants
-                        ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules);
+                        // Accept multiple schema variants (now includes plane)
+                        ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules, Collider.Planes);
                     }
                 }
 
                 // NEW: support single 'shape' object or array when 'shapes' is not present
-                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0)
+                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0 && Collider.Planes.Num() == 0)
                 {
-                    // Single object
                     const TSharedPtr<FJsonObject>* SingleShapeObj = nullptr;
                     if ((*CObj)->TryGetObjectField(TEXT("shape"), SingleShapeObj) && SingleShapeObj && SingleShapeObj->IsValid())
                     {
-                        ParseOneShapeObject(*SingleShapeObj, Collider.Spheres, Collider.Capsules);
+                        ParseOneShapeObject(*SingleShapeObj, Collider.Spheres, Collider.Capsules, Collider.Planes);
                     }
                     else
                     {
-                        // Some tools may emit an array under 'shape'
                         const TArray<TSharedPtr<FJsonValue>>* ShapeArray = nullptr;
                         if ((*CObj)->TryGetArrayField(TEXT("shape"), ShapeArray) && ShapeArray)
                         {
@@ -315,14 +368,14 @@ namespace
                             {
                                 const TSharedPtr<FJsonObject>* SObj = nullptr;
                                 if (!SV.IsValid() || !SV->TryGetObject(SObj) || !SObj || !SObj->IsValid()) continue;
-                                ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules);
+                                ParseOneShapeObject(*SObj, Collider.Spheres, Collider.Capsules, Collider.Planes);
                             }
                         }
                     }
                 }
 
                 // If shapes were not found in VRMC_springBone, try VRMC_node_collider maps
-                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0 && Collider.NodeIndex != INDEX_NONE)
+                if (Collider.Spheres.Num() == 0 && Collider.Capsules.Num() == 0 && Collider.Planes.Num() == 0 && Collider.NodeIndex != INDEX_NONE)
                 {
                     if (const TArray<FVRMSpringColliderSphere>* FoundS = NodeSpheres.Find(Collider.NodeIndex))
                     {
@@ -332,37 +385,34 @@ namespace
                     {
                         Collider.Capsules.Append(*FoundC);
                     }
+                    if (const TArray<FVRMSpringColliderPlane>* FoundP = NodePlanes.Find(Collider.NodeIndex))
+                    {
+                        Collider.Planes.Append(*FoundP);
+                    }
                 }
 
                 Out.Colliders.Add(MoveTemp(Collider));
             }
         }
 
-        // NEW: Some exporters only specify shapes under VRMC_node_collider and do not list any
-        // colliders in VRMC_springBone. In that case, synthesize collider entries for those nodes
-        // so downstream code has proper shapes.
-        if (Out.Colliders.Num() == 0 && (NodeSpheres.Num() > 0 || NodeCapsules.Num() > 0))
+        // Synthesized colliders for shapes only defined via node collider extension
+        if (Out.Colliders.Num() == 0 && (NodeSpheres.Num() > 0 || NodeCapsules.Num() > 0 || NodePlanes.Num() > 0))
         {
             TSet<int32> NodesWithAnyShape;
             for (const auto& Pair : NodeSpheres) { NodesWithAnyShape.Add(Pair.Key); }
             for (const auto& Pair : NodeCapsules) { NodesWithAnyShape.Add(Pair.Key); }
+            for (const auto& Pair : NodePlanes) { NodesWithAnyShape.Add(Pair.Key); }
 
             for (int32 NodeIdx : NodesWithAnyShape)
             {
                 FVRMSpringCollider Synth;
                 Synth.NodeIndex = NodeIdx;
-                if (const TArray<FVRMSpringColliderSphere>* FoundS = NodeSpheres.Find(NodeIdx))
+                if (const TArray<FVRMSpringColliderSphere>* FoundS = NodeSpheres.Find(NodeIdx)) { Synth.Spheres.Append(*FoundS); }
+                if (const TArray<FVRMSpringColliderCapsule>* FoundC = NodeCapsules.Find(NodeIdx)) { Synth.Capsules.Append(*FoundC); }
+                if (const TArray<FVRMSpringColliderPlane>* FoundP = NodePlanes.Find(NodeIdx)) { Synth.Planes.Append(*FoundP); }
+                if (Synth.Spheres.Num() > 0 || Synth.Capsules.Num() > 0 || Synth.Planes.Num() > 0)
                 {
-                    Synth.Spheres.Append(*FoundS);
-                }
-                if (const TArray<FVRMSpringColliderCapsule>* FoundC = NodeCapsules.Find(NodeIdx))
-                {
-                    Synth.Capsules.Append(*FoundC);
-                }
-                if (Synth.Spheres.Num() > 0 || Synth.Capsules.Num() > 0)
-                {
-                    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Synthesized collider for node %d from VRMC_node_collider (Spheres=%d, Capsules=%d)"),
-                        NodeIdx, Synth.Spheres.Num(), Synth.Capsules.Num());
+                    UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Synthesized collider (S=%d C=%d P=%d) for node %d from VRMC_node_collider"), Synth.Spheres.Num(), Synth.Capsules.Num(), Synth.Planes.Num(), NodeIdx);
                     Out.Colliders.Add(MoveTemp(Synth));
                 }
             }
@@ -423,7 +473,6 @@ namespace
                 // center can be a number or an object { node: <index> }
                 TryGetNodeIndexFlexible(*SObj, TEXT("center"), S.CenterNodeIndex);
 
-                // Track if these were set at the spring level; if not, we'll adopt joint-level values
                 bool bStiffSet = false, bDragSet = false, bGravPowSet = false, bGravDirSet = false, bHitSet = false;
 
                 float TmpF = 0.f;
@@ -431,14 +480,11 @@ namespace
                 if ((*SObj)->TryGetNumberField(TEXT("drag"), TmpF)) { S.Drag = TmpF; bDragSet = true; }
                 else if ((*SObj)->TryGetNumberField(TEXT("dragForce"), TmpF)) { S.Drag = TmpF; bDragSet = true; }
                 if ((*SObj)->TryGetNumberField(TEXT("gravityPower"), TmpF)) { S.GravityPower = TmpF; bGravPowSet = true; }
-                // gravityDir vector
                 {
                     const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
                     if ((*SObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
                     {
-                        // Default for JSON is glTF space (Y-up), so use (0,-1,0) as glTF down
                         S.GravityDir = ReadVec3(*SObj, TEXT("gravityDir"), FVector(0,-1,0));
-                        // Convert parsed glTF direction into Unreal (Z-up)
                         S.GravityDir = GltfToUE_Dir(S.GravityDir);
                         bGravDirSet = true;
                     }
@@ -450,16 +496,13 @@ namespace
                 {
                     for (const TSharedPtr<FJsonValue>& JV : *SJ)
                     {
-                        // joints entry can be a number (index into top-level joints) or an object with node and params
                         const TSharedPtr<FJsonObject>* JObj = nullptr;
                         if (JV.IsValid() && JV->TryGetObject(JObj) && JObj && JObj->IsValid())
                         {
-                            // Create a joint entry based on this object
                             FVRMSpringJoint J;
                             (*JObj)->TryGetNumberField(TEXT("node"), J.NodeIndex);
                             (*JObj)->TryGetNumberField(TEXT("hitRadius"), J.HitRadius);
 
-                            // Adopt per-joint parameters as spring defaults if spring-level did not specify them
                             float JVal = 0.f; bool bAnyAdopted = false;
                             if (!bStiffSet && (*JObj)->TryGetNumberField(TEXT("stiffness"), JVal)) { S.Stiffness = JVal; bStiffSet = true; bAnyAdopted = true; }
                             if (!bDragSet && ( (*JObj)->TryGetNumberField(TEXT("drag"), JVal) || (*JObj)->TryGetNumberField(TEXT("dragForce"), JVal) )) { S.Drag = JVal; bDragSet = true; bAnyAdopted = true; }
@@ -469,7 +512,6 @@ namespace
                                 const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
                                 if ((*JObj)->TryGetArrayField(TEXT("gravityDir"), Arr) && Arr && Arr->Num() >= 3)
                                 {
-                                    // Read joint-level gravityDir (glTF space) and convert to UE space
                                     S.GravityDir = ReadVec3(*JObj, TEXT("gravityDir"), FVector(0,-1,0));
                                     S.GravityDir = GltfToUE_Dir(S.GravityDir);
                                     bGravDirSet = true; bAnyAdopted = true;
@@ -479,7 +521,7 @@ namespace
 
                             if (bAnyAdopted)
                             {
-                                UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM1: Adopted spring params from joint object for spring '%s' (node=%d)"), *S.Name, J.NodeIndex);
+                                UE_LOG(LogVRMSpring, VeryVerbose, TEXT("[VRMSpring Parser] VRM1: Adopted spring params from joint object for spring '%s' (node=%d)"), *S.Name, J.NodeIndex);
                             }
 
                             const int32 NewJointIndex = Out.Joints.Add(MoveTemp(J));
@@ -487,7 +529,6 @@ namespace
                         }
                         else
                         {
-                            // Fallback: assume it's a numeric index
                             S.JointIndices.Add((int32)JV->AsNumber());
                         }
                     }
@@ -508,7 +549,7 @@ namespace
         return true;
     }
 
-    // VRM 0.x
+    // VRM 0.x (unchanged, no plane shapes expected)
     static bool ParseVRM0(const TSharedPtr<FJsonObject>& Root, FVRMSpringConfig& Out, FString& OutError)
     {
         const TSharedPtr<FJsonObject>* Exts = nullptr;
@@ -534,7 +575,6 @@ namespace
 
         Out.Spec = EVRMSpringSpec::VRM0;
 
-        // colliders: flattened from colliderGroups[].colliders (spheres only in 0.x)
         const TArray<TSharedPtr<FJsonValue>>* ColliderGroups = nullptr;
         TArray<int32> GroupIndexToFirstCollider;
         if ((*Sec)->TryGetArrayField(TEXT("colliderGroups"), ColliderGroups) && ColliderGroups)
@@ -579,7 +619,6 @@ namespace
             }
         }
 
-        // boneGroups -> springs
         const TArray<TSharedPtr<FJsonValue>>* BoneGroups = nullptr;
         if ((*Sec)->TryGetArrayField(TEXT("boneGroups"), BoneGroups) && BoneGroups)
         {
@@ -592,17 +631,14 @@ namespace
                 (*BObj)->TryGetStringField(TEXT("comment"), Spring.Name);
                 (*BObj)->TryGetNumberField(TEXT("center"), Spring.CenterNodeIndex);
 
-                // legacy typo 'stiffiness' sometimes appears in 0.x exports
                 bool bUsedLegacyStiffiness = false;
                 if ((*BObj)->TryGetNumberField(TEXT("stiffiness"), Spring.Stiffness))
                 {
                     bUsedLegacyStiffiness = true;
                     UE_LOG(LogVRMSpring, Verbose, TEXT("[VRMSpring Parser] VRM0: detected legacy 'stiffiness' field and mapped to 'stiffness' (value=%.3f)"), Spring.Stiffness);
                 }
-                // preferred 'stiffness'
                 (*BObj)->TryGetNumberField(TEXT("stiffness"), Spring.Stiffness);
                 (*BObj)->TryGetNumberField(TEXT("dragForce"), Spring.Drag);
-                // Read glTF-space gravityDir defaulting to glTF down (0,-1,0), then convert to UE space
                 Spring.GravityDir = ReadVec3(*BObj, TEXT("gravityDir"), FVector(0, -1, 0));
                 Spring.GravityDir = GltfToUE_Dir(Spring.GravityDir);
                 (*BObj)->TryGetNumberField(TEXT("gravityPower"), Spring.GravityPower);
@@ -613,7 +649,6 @@ namespace
                     UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] VRM0: Mapped legacy 'stiffiness' to 'stiffness' for spring '%s'"), *Spring.Name);
                 }
 
-                // bones -> we map to Joints + indices
                 const TArray<TSharedPtr<FJsonValue>>* Bones = nullptr;
                 if ((*BObj)->TryGetArrayField(TEXT("bones"), Bones) && Bones)
                 {
@@ -626,7 +661,6 @@ namespace
                     }
                 }
 
-                // colliderGroups indices
                 const TArray<TSharedPtr<FJsonValue>>* CG = nullptr;
                 if ((*BObj)->TryGetArrayField(TEXT("colliderGroups"), CG) && CG)
                 {
@@ -650,54 +684,15 @@ namespace VRM
     {
         OutConfig = FVRMSpringConfig();
         OutError.Empty();
-
-        if (Json.IsEmpty())
-        {
-            OutError = TEXT("Empty JSON.");
-            return false;
-        }
-
-        TSharedPtr<FJsonObject> Root;
-        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
-        if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
-        {
-            OutError = TEXT("Failed to parse JSON.");
-            return false;
-        }
-
-        // Try VRM1 first
-        if (ParseVRM1(Root, OutConfig, OutError))
-        {
-            OutConfig.RawJson = Json;
-            UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM1: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num());
-            return true;
-        }
-
-        // Reset error, try VRM0
-        FString Err0;
-        FVRMSpringConfig As0;
-        if (ParseVRM0(Root, As0, Err0))
-        {
-            OutConfig = MoveTemp(As0);
-            OutConfig.RawJson = Json;
-            OutError.Reset();
-            UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM0: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num());
-            return true;
-        }
-
-        // No spring data
-        OutError = TEXT("No VRM spring bone data detected.");
-        return false;
+        if (Json.IsEmpty()) { OutError = TEXT("Empty JSON."); return false; }
+        TSharedPtr<FJsonObject> Root; const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+        if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid()) { OutError = TEXT("Failed to parse JSON."); return false; }
+        if (ParseVRM1(Root, OutConfig, OutError)) { OutConfig.RawJson = Json; UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM1: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num()); return true; }
+        FString Err0; FVRMSpringConfig As0; if (ParseVRM0(Root, As0, Err0)) { OutConfig = MoveTemp(As0); OutConfig.RawJson = Json; OutError.Reset(); UE_LOG(LogVRMSpring, Log, TEXT("[VRMSpring Parser] Parsed VRM spring bones as VRM0: Springs=%d Colliders=%d Joints=%d ColliderGroups=%d"), OutConfig.Springs.Num(), OutConfig.Colliders.Num(), OutConfig.Joints.Num(), OutConfig.ColliderGroups.Num()); return true; }
+        OutError = TEXT("No VRM spring bone data detected."); return false;
     }
-
     bool ParseSpringBonesFromFile(const FString& Filename, FVRMSpringConfig& OutConfig, FString& OutError)
     {
-        FString Json;
-        if (!ExtractTopLevelJsonString(Filename, Json))
-        {
-            OutError = TEXT("Could not extract top-level JSON from file.");
-            return false;
-        }
-        return ParseSpringBonesFromJson(Json, OutConfig, OutError);
+        FString Json; if (!ExtractTopLevelJsonString(Filename, Json)) { OutError = TEXT("Could not extract top-level JSON from file."); return false; } return ParseSpringBonesFromJson(Json, OutConfig, OutError);
     }
 }

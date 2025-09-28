@@ -223,7 +223,11 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
             if (bWantsReuseABP)
             {
                 FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-                FARFilter Filter; Filter.bRecursivePaths = false; Filter.PackagePaths.Add(*AnimFolder); Filter.ClassNames.Add(UAnimBlueprint::StaticClass()->GetFName());
+                FARFilter Filter;
+                Filter.bRecursivePaths = false;
+                Filter.PackagePaths.Add(*AnimFolder);
+                // Updated: use ClassPaths (deprecated ClassNames removed)
+                Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
                 TArray<FAssetData> Found; ARM.Get().GetAssets(Filter, Found);
                 if (Found.Num() > 0)
                 {

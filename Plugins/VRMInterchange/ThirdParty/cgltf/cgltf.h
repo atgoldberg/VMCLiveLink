@@ -94,6 +94,10 @@
 #ifndef CGLTF_H_INCLUDED__
 #define CGLTF_H_INCLUDED__
 
+#if defined(_MSC_VER) && !defined(_CRT_SECURE_NO_WARNINGS)
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 #include <stddef.h>
 #include <stdint.h> /* For uint8_t, uint32_t */
 
