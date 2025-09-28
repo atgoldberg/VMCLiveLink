@@ -109,64 +109,96 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
     // Build a component-space pose from the current evaluated pose so we can fetch live joint/world transforms.
     FCSPose<FCompactPose> CSPose;
     CSPose.InitPose(Output.Pose);
-    FAnimationRuntime::FillUpComponentSpaceTransforms(Output.Pose.GetBoneContainer(), Output.Pose, CSPose);
-
     const FBoneContainer& BoneContainer = Output.Pose.GetBoneContainer();
+
+    // Manually accumulate component-space transforms using proper API (operator[] not supported on FCSPose)
+    const TArray<FBoneIndexType>& BoneIndices = BoneContainer.GetBoneIndicesArray();
+    for (FBoneIndexType BoneIndex : BoneIndices)
+    {
+        const FCompactPoseBoneIndex CPIndex(BoneIndex);
+        const FCompactPoseBoneIndex ParentIndex = BoneContainer.GetParentBoneIndex(CPIndex);
+        const FTransform& LocalTransform = Output.Pose[CPIndex]; // local space bone transform
+        if (!ParentIndex.IsValid())
+        {
+            CSPose.SetComponentSpaceTransform(CPIndex, LocalTransform);
+        }
+        else
+        {
+            const FTransform& ParentCST = CSPose.GetComponentSpaceTransform(ParentIndex);
+            CSPose.SetComponentSpaceTransform(CPIndex, LocalTransform * ParentCST);
+        }
+    }
 
     for (FVRMSBChainCache& Chain : ChainCaches)
     {
         if (Chain.Joints.Num() == 0) continue;
 
-        // Gravity (external) term prepared once per chain. (Spec: gravityDir * gravityPower, applied each step scaled by h)
+        // External gravity (constant per chain per frame)
         const FVector ExternalGravity = Chain.GravityDir * Chain.GravityPower;
 
-        // Root->Leaf order already inherent in joint array order (validated during cache build).
-        for (int32 j=0; j<Chain.Joints.Num(); ++j)
+        // --- Task 06 Root->Leaf propagation per sub-step ---
+        for (int32 Step = 0; Step < CachedSubsteps; ++Step)
         {
-            FVRMSBJointCache& JC = Chain.Joints[j];
-            if (!JC.bValid) continue;
-            if (JC.RestLength <= KINDA_SMALL_NUMBER) continue; // leaf-only joint, nothing to simulate yet
-
-            // Current joint (Head) component/world transform
-            const FCompactPoseBoneIndex HeadCPIndex = JC.BoneIndex;
-            FQuat HeadWorldRot = FQuat::Identity;
-            FVector HeadWorldPos = JC.ParentRefPos; // fallback
-            if (HeadCPIndex.IsValid())
+            for (int32 j = 0; j < Chain.Joints.Num(); ++j)
             {
-                const FTransform& HeadCST = CSPose.GetComponentSpaceTransform(HeadCPIndex);
-                HeadWorldPos = HeadCST.GetLocation();
-                HeadWorldRot = HeadCST.GetRotation();
-            }
+                FVRMSBJointCache& JC = Chain.Joints[j];
+                if (!JC.bValid) continue;
+                if (JC.RestLength <= KINDA_SMALL_NUMBER) continue; // leaf placeholder (no tail)
 
-            // Parent world rotation for stiffness force (spec uses node.parent rotation)
-            FQuat ParentWorldRot = FQuat::Identity;
-            if (HeadCPIndex.IsValid())
-            {
-                const FCompactPoseBoneIndex ParentCP = BoneContainer.GetParentBoneIndex(HeadCPIndex);
-                if (ParentCP.IsValid())
+                // Joint (Head) current animated transform
+                const FCompactPoseBoneIndex HeadCPIndex = JC.BoneIndex;
+                FQuat HeadWorldRot = FQuat::Identity;
+                FVector HeadWorldPos = JC.ParentRefPos; // fallback
+                if (HeadCPIndex.IsValid())
                 {
-                    ParentWorldRot = CSPose.GetComponentSpaceTransform(ParentCP).GetRotation();
+                    const FTransform& HeadCST = CSPose.GetComponentSpaceTransform(HeadCPIndex);
+                    HeadWorldPos = HeadCST.GetLocation();
+                    HeadWorldRot = HeadCST.GetRotation();
                 }
-            }
 
-            // Pre-compute target rest direction in component space = parentWorldRot * (initialLocalRotation * boneAxisLocal)
-            FVector RestDirCS = ParentWorldRot.RotateVector(JC.InitialLocalRotation.RotateVector(JC.BoneAxisLocal));
-            if (RestDirCS.IsNearlyZero())
-            {
-                RestDirCS = JC.RestDirection; // fallback to cached rest direction (component space)
-            }
-            RestDirCS = RestDirCS.GetSafeNormal();
+                // Parent world rotation (animated) for rest direction reconstruction
+                FQuat ParentWorldRot = FQuat::Identity;
+                if (HeadCPIndex.IsValid())
+                {
+                    const FCompactPoseBoneIndex ParentCP = BoneContainer.GetParentBoneIndex(HeadCPIndex);
+                    if (ParentCP.IsValid())
+                    {
+                        ParentWorldRot = CSPose.GetComponentSpaceTransform(ParentCP).GetRotation();
+                    }
+                }
 
-            // Animated target tip position (rest orientation from current joint position)
-            const FVector AnimatedRestTip = HeadWorldPos + RestDirCS * JC.RestLength;
+                // Rest direction in component space from current animated parent orientation
+                FVector RestDirCS = ParentWorldRot.RotateVector(JC.InitialLocalRotation.RotateVector(JC.BoneAxisLocal));
+                if (RestDirCS.IsNearlyZero())
+                {
+                    RestDirCS = JC.RestDirection; // fallback to cached ref pose direction
+                }
+                RestDirCS = RestDirCS.GetSafeNormal();
 
-            for (int32 Step=0; Step<CachedSubsteps; ++Step)
-            {
+                // Anchor: root joint uses its animated head position; descendants use previous joint's simulated tip
+                FVector AnchorPos;
+                if (j == 0)
+                {
+                    AnchorPos = HeadWorldPos;
+                }
+                else
+                {
+                    const FVRMSBJointCache& PrevJC = Chain.Joints[j-1];
+                    if (PrevJC.bValid && PrevJC.RestLength > KINDA_SMALL_NUMBER)
+                    {
+                        AnchorPos = PrevJC.CurrTip; // simulated propagation
+                    }
+                    else
+                    {
+                        AnchorPos = HeadWorldPos; // fallback if parent not valid for simulation
+                    }
+                }
+
                 // Inertia (Verlet implicit velocity) with drag
                 const FVector Velocity = (JC.CurrTip - JC.PrevTip);
                 const FVector Inertia = Velocity * (1.0f - Chain.Drag);
 
-                // Stiffness additive force (spec form): h * parentWorldRot * initialLocalRot * boneAxis * stiffness
+                // Stiffness additive force (spec form): h * restDir * stiffness
                 const FVector StiffnessForce = RestDirCS * (Chain.Stiffness * CachedH);
 
                 // External gravity force (spec): h * gravityDir * gravityPower
@@ -174,16 +206,16 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
 
                 FVector NextTip = JC.CurrTip + Inertia + StiffnessForce + GravityForce;
 
-                // Length constraint back to fixed distance from Head
-                const FVector ToNext = NextTip - HeadWorldPos;
+                // Length constraint back to fixed distance from anchor
+                const FVector ToNext = NextTip - AnchorPos;
                 const float Dist = ToNext.Size();
                 if (Dist > SMALL_NUMBER)
                 {
-                    NextTip = HeadWorldPos + (ToNext / Dist) * JC.RestLength;
+                    NextTip = AnchorPos + (ToNext / Dist) * JC.RestLength;
                 }
                 else
                 {
-                    NextTip = AnimatedRestTip; // fallback
+                    NextTip = AnchorPos + RestDirCS * JC.RestLength;
                 }
 
                 JC.PrevTip = JC.CurrTip;
@@ -196,7 +228,7 @@ void FAnimNode_VRMSpringBone::Evaluate_AnyThread(FPoseContext& Output)
     if (LastLoggedFrame != FrameCounter)
     {
         LastLoggedFrame = FrameCounter;
-        UE_LOG(LogVRMSpring, VeryVerbose, TEXT("[VRMSpring][Tasks04-05] Simulated frame=%llu Springs=%d Joints=%d"), FrameCounter, ChainCaches.Num(), TotalValidJoints);
+        UE_LOG(LogVRMSpring, VeryVerbose, TEXT("[VRMSpring][Task06] Simulated frame=%llu Springs=%d Joints=%d (Root->Leaf propagation)"), FrameCounter, ChainCaches.Num(), TotalValidJoints);
     }
 #endif
 }
