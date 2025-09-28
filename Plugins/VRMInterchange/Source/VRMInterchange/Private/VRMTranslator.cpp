@@ -1025,6 +1025,27 @@ bool UVRMTranslator::LoadVRM(FVRMParsedModel& Out) const
         return false;
     }
 
+    // Build node index -> bone name map for spring bone resolution
+    if (Skin && Data->nodes_count > 0)
+    {
+        for (size_t nodeIdx = 0; nodeIdx < Data->nodes_count; ++nodeIdx)
+        {
+            const cgltf_node* Node = &Data->nodes[nodeIdx];
+            if (Node && Node->name)
+            {
+                FString NodeName = UTF8_TO_TCHAR(Node->name);
+                for (size_t jointIdx = 0; jointIdx < Skin->joints_count; ++jointIdx)
+                {
+                    if (Skin->joints[jointIdx] == Node)
+                    {
+                        Out.NodeToBoneMap.Add(static_cast<int32>(nodeIdx), FName(*NodeName));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Merge all primitives from all meshes (extracted)
     if (!MergePrimitivesFromMeshes(Data, Skin, NodeToBone, Out))
     {

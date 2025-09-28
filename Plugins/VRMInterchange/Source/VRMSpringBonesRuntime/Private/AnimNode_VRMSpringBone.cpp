@@ -310,11 +310,60 @@ void FAnimNode_VRMSpringBone::SimulateChains(const FBoneContainer& BoneContainer
         else { const float Inner = FMath::Max(0.f, Radius - TipRadius); if (Dist > Inner){ const float Pen = Dist - Inner; const FVector N = ToTip/Dist; Tip -= N*Pen; } }
     };
     auto ResolveCapsule = [](const FVector& A, const FVector& B, float Radius, bool bInside, FVector& Tip, float TipRadius){
-        const float Combined = Radius + TipRadius; const FVector Closest = ClosestPointOnSegment(A,B,Tip); const FVector ToTip = Tip - Closest; const float DistSqr = ToTip.SizeSquared();
-        if (DistSqr < KINDA_SMALL_NUMBER){ FVector Axis=(B-A).GetSafeNormal(); if (Axis.IsNearlyZero()) Axis=FVector::UpVector; FVector Perp=FVector::CrossProduct(Axis,FVector::RightVector); if (Perp.IsNearlyZero()) Perp=FVector::UpVector; Perp=Perp.GetSafeNormal(); Tip = Closest + Perp * (bInside? Combined*0.99f : Combined + 0.1f); return; }
+        const float Combined = Radius + TipRadius;
+        // Calculate offset to tail
+        const FVector OffsetToTail = B - A;
+        const FVector Delta = Tip - A;
+        
+        // Calculate dot product for position along capsule
+        const float Dot = FVector::DotProduct(OffsetToTail, Delta);
+        
+        FVector AdjustedDelta = Delta;
+        const float OffsetToTailLenSqr = OffsetToTail.SizeSquared();
+        
+        if (Dot < 0.0f) {
+            // When the joint is at the head side of the capsule
+            // Use delta as-is (no adjustment)
+        } else if (Dot > OffsetToTailLenSqr) {
+            // When the joint is at the tail side of the capsule
+            AdjustedDelta = Delta - OffsetToTail;
+        } else {
+            // When the joint is between the head and tail of the capsule
+            if (OffsetToTailLenSqr > KINDA_SMALL_NUMBER)
+            {
+                AdjustedDelta = Delta - OffsetToTail * (Dot / OffsetToTailLenSqr);
+            }
+        }
+        
+        const float DistSqr = AdjustedDelta.SizeSquared();
+        if (DistSqr < KINDA_SMALL_NUMBER) {
+            // Handle degenerate case
+            FVector Axis = OffsetToTail.GetSafeNormal();
+            if (Axis.IsNearlyZero()) Axis = FVector::UpVector;
+            FVector Perp = FVector::CrossProduct(Axis, FVector::RightVector);
+            if (Perp.IsNearlyZero()) Perp = FVector::CrossProduct(Axis, FVector::ForwardVector);
+            Perp.Normalize();
+            Tip = A + Perp * (bInside ? Combined * 0.99f : Combined + 0.1f);
+            return;
+        }
+        
         const float Dist = FMath::Sqrt(DistSqr);
-        if (!bInside){ if (Dist < Combined){ const float Pen = Combined - Dist; const FVector N = ToTip/Dist; Tip += N*Pen; } }
-        else { const float Inner = FMath::Max(0.f, Radius - TipRadius); if (Dist > Inner){ const float Pen = Dist - Inner; const FVector N = ToTip/Dist; Tip -= N*Pen; } }
+        const FVector Direction = AdjustedDelta / Dist;
+        
+        if (!bInside) {
+            // Outside collider: push away if too close
+            if (Dist < Combined) {
+                const float Penetration = Combined - Dist;
+                Tip += Direction * Penetration;
+            }
+        } else {
+            // Inside collider: keep within bounds
+            const float Inner = FMath::Max(0.f, Radius - TipRadius);
+            if (Dist > Inner) {
+                const float Penetration = Dist - Inner;
+                Tip -= Direction * Penetration;
+            }
+        }
     };
     auto ResolvePlane = [](const FVector& P0, const FVector& N, FVector& Tip, float TipRadius){ const float Dist = FVector::DotProduct(Tip - P0, N) - TipRadius; if (Dist < 0.f){ Tip -= N * Dist; } };
     const int32 Iterations = FMath::Clamp(ConstraintIterations, 1, 4);
@@ -399,9 +448,25 @@ FCompactPoseBoneIndex FAnimNode_VRMSpringBone::ResolveBone(const FBoneContainer&
 
 FCompactPoseBoneIndex FAnimNode_VRMSpringBone::ResolveBoneByNodeIndex(const FBoneContainer& BoneContainer, int32 NodeIndex) const
 {
-    if (SpringConfig == nullptr || NodeIndex == INDEX_NONE) return FCompactPoseBoneIndex(INDEX_NONE);
+    if (SpringConfig == nullptr || NodeIndex == INDEX_NONE) {
+        return FCompactPoseBoneIndex(INDEX_NONE);
+    }
+
+    // Primary: use node->bone map from data asset
     const FName BoneName = SpringConfig->GetBoneNameForNode(NodeIndex);
-    return ResolveBone(BoneContainer, BoneName);
+    if (!BoneName.IsNone()) {
+        return ResolveBone(BoneContainer, BoneName);
+    }
+
+    // Fallback: interpret node index directly as reference skeleton index (legacy behavior)
+    const FReferenceSkeleton& RefSkeleton = BoneContainer.GetReferenceSkeleton();
+    if (NodeIndex >= 0 && NodeIndex < RefSkeleton.GetNum()) {
+        const FName FallbackName = RefSkeleton.GetBoneName(NodeIndex);
+        UE_LOG(LogVRMSpring, Warning, TEXT("[VRMSpring] Using fallback bone resolution for node %d -> %s"), NodeIndex, *FallbackName.ToString());
+        return ResolveBone(BoneContainer, FallbackName);
+    }
+
+    return FCompactPoseBoneIndex(INDEX_NONE);
 }
 
 void FAnimNode_VRMSpringBone::RebuildCaches_AnyThread(const FBoneContainer& BoneContainer)

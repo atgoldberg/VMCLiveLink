@@ -78,6 +78,9 @@ struct FVRMParsedModel
     // Single merged mesh for now
     FVRMParsedMesh Mesh;
 
+    // New: Node index -> Bone name map (populated during LoadVRM)
+    TMap<int32, FName> NodeToBoneMap;
+
     float GlobalScale = 100.f;
 };
 
