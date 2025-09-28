@@ -18,6 +18,8 @@ struct VRMINTERCHANGE_API FVRMSpringColliderSphere
 
     UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
     UPROPERTY(VisibleAnywhere, Category="VRM") float Radius = 0.f;
+    // If true, this is an inside-sphere collider (prevents joints from leaving the sphere)
+    UPROPERTY(VisibleAnywhere, Category="VRM") bool bInside = false;
 };
 
 USTRUCT(BlueprintType)
@@ -28,6 +30,18 @@ struct VRMINTERCHANGE_API FVRMSpringColliderCapsule
     UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
     UPROPERTY(VisibleAnywhere, Category="VRM") float Radius = 0.f;
     UPROPERTY(VisibleAnywhere, Category="VRM") FVector TailOffset = FVector::ZeroVector;
+    // If true, this is an inside-capsule collider (prevents joints from leaving the capsule)
+    UPROPERTY(VisibleAnywhere, Category="VRM") bool bInside = false;
+};
+
+USTRUCT(BlueprintType)
+struct VRMINTERCHANGE_API FVRMSpringColliderPlane
+{
+    GENERATED_BODY()
+
+    // Plane offset and normal in local space
+    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
+    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Normal = FVector(0,0,1);
 };
 
 USTRUCT(BlueprintType)
@@ -39,6 +53,8 @@ struct VRMINTERCHANGE_API FVRMSpringCollider
     UPROPERTY(VisibleAnywhere, Category="VRM") FName BoneName;
     UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderSphere> Spheres;
     UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderCapsule> Capsules;
+    // Extended shapes: planes
+    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderPlane> Planes;
 };
 
 USTRUCT(BlueprintType)

@@ -8,7 +8,7 @@ Implement a deterministic, component-space spring bone simulation node for **Unr
 ## Sources of Truth
 - **Data Asset:** `Plugins/VRMInterchange/Source/VRMInterchange/Public/VRMSpringBoneData.h` (branch: `dev`).  
   • Only fields declared here are valid. Do **not** invent parameters.  
-- **VRM Specification:** https://github.com/vrm-c/vrm-specification/tree/master/specification  
+- **VRM Specification:** `Planning/VRM_SpringBones_Spec.md` and `Planning/VRM_SpringBones_Spec_Extracted.md` 
   • Spring bone behavior and collider semantics must follow this spec.  
 - **Test Avatar:** `Renarde.vrmgltf` (import into a UE 5.6 project for validation).
 
