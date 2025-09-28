@@ -10,6 +10,7 @@ Implement a deterministic, component-space spring bone simulation node for **Unr
   • Only fields declared here are valid. Do **not** invent parameters.  
 - **VRM Specification:** `Planning/VRM_SpringBones_Spec.md` and `Planning/VRM_SpringBones_Spec_Extracted.md` 
   • Spring bone behavior and collider semantics must follow this spec.  
+- **Unreal Engine APIs:** Please refer to the files under `Engine/UE5` in this solution for all interfaces and helper functions.
 - **Test Avatar:** `Renarde.vrmgltf` (import into a UE 5.6 project for validation).
 
 ---
@@ -101,7 +102,8 @@ All must pass in **Editor**, **Standalone**, and **Shipping** builds (debug comp
 2. **Implement only your assigned task** as specified in its Task file (see `/tasks`).
 3. **Cross-check** against:
    - `VRMSpringBoneData.h` (dev branch path above)
-   - VRM Spec (link above)
+   - `Planning/VRM_SpringBones_Spec.md` and `Planning/VRM_SpringBones_Spec_Extracted.md`
+   - `postmortems/postmortem-<previous-task-numbers>.md` (if applicable)
 4. **Do not invent data fields.**
 5. **Submit compiling code** against the baseline plugin.
 6. **Produce a Post-Mortem file**: `/postmortems/postmortem-<task-number>.md` using the template below.

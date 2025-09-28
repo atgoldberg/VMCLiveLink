@@ -50,6 +50,7 @@ struct FVRMSBSphereShapeCache
     FName BoneName;
     FVector LocalOffset = FVector::ZeroVector;
     float Radius = 0.f;
+    bool bInside = false; // Task 07: inside/outside semantics from asset
     bool bValid = false;
 };
 
@@ -60,6 +61,7 @@ struct FVRMSBCapsuleShapeCache
     FVector LocalP0 = FVector::ZeroVector;
     FVector LocalP1 = FVector::ZeroVector;
     float Radius = 0.f;
+    bool bInside = false; // Task 07
     bool bValid = false;
 };
 
@@ -126,4 +128,9 @@ private:
 
     // Time accumulator for fixed timestep mode (Task 3)
     float TimeAccumulator = 0.f;
+
+    // Task 07: per-frame world-space collider caches (no allocation churn)
+    TArray<FVector> SphereWorldPos;      // size == SphereShapeCaches
+    TArray<FVector> CapsuleWorldP0;      // size == CapsuleShapeCaches
+    TArray<FVector> CapsuleWorldP1;      // size == CapsuleShapeCaches
 };
