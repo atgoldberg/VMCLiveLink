@@ -14,13 +14,13 @@ struct FVRMSBJointCache
     float HitRadius = 0.f;
     float RestLength = 0.f;          
     FVector RestDirection = FVector::ZeroVector; 
-    FVector PrevTip = FVector::ZeroVector;       
-    FVector CurrTip = FVector::ZeroVector;       
+    FVector PrevTail = FVector::ZeroVector;       // Matches TypeScript: _prevTail
+    FVector CurrentTail = FVector::ZeroVector;    // Matches TypeScript: _currentTail
     FVector ParentRefPos = FVector::ZeroVector;  
     FQuat InitialLocalRotation = FQuat::Identity;          
     FTransform InitialLocalTransform;                      
-    FVector BoneAxisLocal = FVector::ForwardVector;        
-    float BoneLengthLocal = 0.f;                           
+    FVector BoneAxis = FVector::ForwardVector;        // Matches TypeScript: _boneAxis
+    float WorldSpaceBoneLength = 0.f;             // Matches TypeScript: _worldSpaceBoneLength
     bool bValid = false;
 };
 
@@ -110,6 +110,7 @@ public:
     virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
     virtual void Evaluate_AnyThread(FPoseContext& Output) override;
     virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+    
 private:
     void InvalidateCaches();
     void RebuildCaches_AnyThread(const FBoneContainer& BoneContainer);
@@ -118,33 +119,42 @@ private:
     void BuildComponentSpacePose(const FPoseContext& SourcePose, FCSPose<FCompactPose>& OutCSPose) const;
     // Non-const pose references (UE method GetComponentSpaceTransform is non-const)
     void PrepareColliderWorldCaches(FCSPose<FCompactPose>& CSPose);
+    void InitializeSpringState(FCSPose<FCompactPose>& CSPose);
     void SimulateChains(const FBoneContainer& BoneContainer, FCSPose<FCompactPose>& CSPose);
     void ApplyRotations(FPoseContext& Output, FCSPose<FCompactPose>& CSPose);
 
+#if !UE_BUILD_SHIPPING
+    void DrawSpringBones(FPoseContext& Output, FCSPose<FCompactPose>& CSPose, int32 SpringDrawMode) const;
+    void DrawColliders(FPoseContext& Output) const;
+#endif
+
+    // Cache data structures
     TArray<FVRMSBChainCache> ChainCaches;
     TArray<FVRMSBSphereShapeCache> SphereShapeCaches;
     TArray<FVRMSBCapsuleShapeCache> CapsuleShapeCaches;
     TArray<FVRMSBPlaneShapeCache> PlaneShapeCaches;
 
-    FString LastAssetHash;
-    TWeakObjectPtr<UVRMSpringBoneData> LastAssetPtr;
-    bool bCachesValid = false;
-
-    int32 TotalValidJoints = 0; 
-    uint64 LastLoggedFrame = 0;
-    uint64 LastStepLoggedFrame = 0; 
-    int32 CachedSubsteps = 1;
-    float CachedH = 1.0f / 60.0f;
-    uint64 LastSimulatedFrame = 0;
-    float TimeAccumulator = 0.f;
-
+    // Cached world-space collider positions
     TArray<FVector> SphereWorldPos;
     TArray<FVector> CapsuleWorldP0;
     TArray<FVector> CapsuleWorldP1;
     TArray<FVector> PlaneWorldPoint;
     TArray<FVector> PlaneWorldNormal;
 
-    bool bLimitsEnabled = false;
-    bool bElasticityEnabled = false; 
-    bool bWasWeightActive = true; 
+    // Asset tracking
+    FString LastAssetHash;
+    TWeakObjectPtr<UVRMSpringBoneData> LastAssetPtr;
+    bool bCachesValid = false;
+
+    // Simulation state
+    int32 TotalValidJoints = 0;
+    float TimeAccumulator = 0.f;
+    int32 CachedSubsteps = 1;
+    float CachedH = 1.0f / 60.0f;
+    bool bWasWeightActive = true;
+
+    // Frame tracking
+    uint64 LastLoggedFrame = 0;
+    uint64 LastStepLoggedFrame = 0;
+    uint64 LastSimulatedFrame = 0;
 };
