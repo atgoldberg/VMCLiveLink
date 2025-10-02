@@ -16,6 +16,18 @@ public:
     UPROPERTY(EditAnywhere, Category="Spring Bones", meta=(ShowOnlyInnerProperties))
     FVRMSpringConfig SpringConfig;
 
+        // Full glTF node hierarchy (per avatar), persisted with the asset.
+    UPROPERTY(VisibleAnywhere, Category="VRM|Hierarchy")
+    TMap<int32, int32> NodeParent;               // NodeIndex -> ParentNodeIndex (INDEX_NONE if root)
+
+    UPROPERTY(VisibleAnywhere, Category="VRM|Hierarchy")
+    TMap<int32, FVRMNodeChildren> NodeChildren;     // NodeIndex -> Children NodeIndices
+
+    // For each joint in SpringConfig.Joints, which *actual* child node forms its tail.
+    // INDEX_NONE means terminal joint (use VRM0 pseudo-tail fallback).
+    UPROPERTY(VisibleAnywhere, Category="VRM|Hierarchy")
+    TArray<int32> ResolvedChildNodeIndexPerJoint;
+
     // IMPROVED: Add node index to bone name mapping for proper VRM compliance
     // This should be populated during VRM import to maintain proper mapping from glTF node indices to UE bone names
     UPROPERTY(VisibleAnywhere, Category="Spring Bones", meta=(ToolTip="Mapping from VRM/glTF node indices to Unreal bone names"))
@@ -34,6 +46,10 @@ public:
 
 #if WITH_EDITOR
     virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+// Compute ResolvedChildNodeIndexPerJoint after SpringConfig is filled + NodeChildren set
+    void BuildResolvedChildren();
+
 #endif
 
     // Utility to get a combined dynamic hash used by runtime to detect changes
@@ -54,4 +70,5 @@ public:
     {
         NodeToBoneMap = InNodeToBoneMap;
     }
+
 };
