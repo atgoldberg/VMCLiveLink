@@ -1,123 +1,128 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Animation/AnimNode_SkeletalControlBase.h"
+#include "BoneControllers/AnimNode_SkeletalControlBase.h"
 #include "VRMSpringBoneData.h"
 #include "AnimNode_VRMSpringBones.generated.h"
 
-// Per-joint transient simulation state (center-space tails; mirrors VRM ref impl)
-USTRUCT()
+// Forward declarations (avoid heavy includes)
+struct FVRMSpringConfig;
+class UVRMSpringBonesData;
+
+/**
+ * Per–joint runtime simulation state (minimal set after dead-code removal).
+ */
 struct FVRMSimJointState
 {
-	GENERATED_BODY()
+	// Initialization flag
+	uint8 bInitialized = 0;
 
-	// current/prev tail positions in *center space* (or world if no center)
+	// Static (per rest pose) data
+	FVector BoneAxisLocal = FVector::ForwardVector;
+	FVector InitialLocalChildPos = FVector::ZeroVector;
+	float   WorldBoneLength = 0.f;
+
+	// Dynamic state
 	FVector CurrentTail = FVector::ZeroVector;
 	FVector PrevTail    = FVector::ZeroVector;
-
-	// local rest axis (child dir in local space)
-	FVector LocalBoneAxis = FVector(0, 0, 1);
-
-	// world-space bone length (recomputed each update)
-	float WorldBoneLength = 0.f;
-
-	// rest pose cache
-	FMatrix44f InitialLocalMatrix = FMatrix44f::Identity;
-	FQuat4f    InitialLocalRot    = FQuat4f::Identity;
+	FVector PrevHeadCS  = FVector::ZeroVector;
 };
 
+/** Range info for a spring chain (indices into the spring's JointIndices array). */
+struct FSpringChainRange
+{
+	int32 First = 0;
+	int32 Num   = 0;
+};
+
+/** Deferred bone write after simulation. */
+struct FBoneWrite
+{
+	FCompactPoseBoneIndex BoneIndex;
+	FVector               NewPosition;
+	FQuat                 NewRotation;
+};
+
+/**
+ * Spring bone solver anim node (VRM multi-chain).
+ * Cleaned version without unused/dead code.
+ */
 USTRUCT(BlueprintInternalUseOnly)
-struct VRMINTERCHANGE_API FAnimNode_VRMSpringBones : public FAnimNode_SkeletalControlBase
+struct VRMSPRINGBONESRUNTIME_API FAnimNode_VRMSpringBones : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_BODY()
 
-	// Spring data parsed at import time (colliders, joints, springs, mappings)
-	UPROPERTY(EditAnywhere, Category="VRM")
-	TObjectPtr<UVRMSpringBoneData> SpringData = nullptr;
-
-	// Master enable
-	UPROPERTY(EditAnywhere, Category="VRM")
+public:
+	/** Master enable switch */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring", meta=(PinShownByDefault))
 	bool bEnable = true;
 
-	// Per-chain sim rate scale (1.0 = game dt)
-	UPROPERTY(EditAnywhere, Category="VRM", meta=(ClampMin="0.0", ClampMax="4.0"))
-	float TimeScale = 1.f;
-
-	// Optional: freeze sim (still writes current pose; no verlet)
-	UPROPERTY(EditAnywhere, Category="VRM")
+	/** Optional runtime pause (debug) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring|Debug", meta=(PinShownByDefault))
 	bool bPauseSimulation = false;
 
-	// Runtime caches
-	// Map VRM Joint index -> UE FBoneReference
-	UPROPERTY(Transient)
-	TArray<FBoneReference> JointBoneRefs;
+	/** Spring configuration asset (contains joints, springs, colliders) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring", meta=(PinShownByDefault))
+	TObjectPtr<UVRMSpringBoneData> SpringData = nullptr;
 
-	// For each joint we keep a sim state
-	UPROPERTY(Transient)
-	TArray<FVRMSimJointState> JointStates;
-
-	// For each spring, precalc its joint index range into JointBoneRefs/JointStates
-	struct FSpringRange { int32 First = INDEX_NONE; int32 Num = 0; int32 CenterJointIndex = INDEX_NONE; };
-	TArray<FSpringRange> SpringRanges;
-
-	// Scratch output rotations cached during Update_AnyThread; Evaluate just applies
-	struct FBoneWrite { FCompactPoseBoneIndex BoneIndex; FQuat NewLocalRot; };
-	TArray<FBoneWrite> PendingBoneWrites;
-
-	// An increasing token so we only compute physics once per animation tick even if Evaluate is called multiple times
-	uint64 LastSimTickId = 0;
-
-	// FAnimNode_SkeletalControlBase overrides
+	// FAnimNode_Base / SkeletalControl overrides
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
-	virtual void Update_AnyThread(const FAnimationUpdateContext& Context) override;
+	virtual void UpdateInternal(const FAnimationUpdateContext& Context) override;
 	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
-	virtual void EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context) override; // UE5.6 path
+	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
 	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 
 private:
-	// ---- helper flow ----
+	/* ---- Core helpers ---- */
+
+	// Maintain length constraint
+	static FVector ApplyLengthConstraint(const FVRMSimJointState& State, FVector TailWS, FVector HeadWS);
+
+	// One-time per joint (lazy) init
+	void InitializeState(FVRMSimJointState& JointState, const FTransform& ComponentTM, const FTransform& JointBoneCS);
+
+	// Build bone references & chain index ranges from config
 	void BuildMappings(const FBoneContainer& BoneContainer);
-	void EnsureStatesInitialized(const FBoneContainer& BoneContainer, const FTransform& ComponentTM);
-	void SimulateSpringsOnce(const FBoneContainer& BoneContainer, const FTransform& ComponentTM, float DeltaTime);
 
-	// ---- math helpers (TS-equivalent split out for clarity) ----
-	static FMatrix44f GetParentWorldMatrix(const FTransform& ComponentTM, const FCSPose<FCompactPose>& CSPose, FCompactPoseBoneIndex BoneIdx);
-	static FVector   CalcWorldHeadPos(const FCSPose<FCompactPose>& CSPose, FCompactPoseBoneIndex BoneIdx);
-	static FVector   CalcWorldChildPos_OrPseudo(const FCSPose<FCompactPose>& CSPose, const FVRMSimJointState& S, FCompactPoseBoneIndex BoneIdx, bool bHasRealChild);
-	static void      CalcWorldBoneLength(FVRMSimJointState& S, const FVector& HeadWS, const FVector& ChildWS);
+	// Allocate & fill initial per-joint state
+	void EnsureStatesInitialized(const FBoneContainer& BoneContainer, FCSPose<FCompactPose>& CSPose);
 
-	// center-space helpers
-	static FMatrix44f GetCenterToWorldMatrix(const FCSPose<FCompactPose>& CSPose, TOptional<FCompactPoseBoneIndex> CenterIdx);
-	static FMatrix44f GetWorldToCenterMatrix(const FMatrix44f& C2W);
+	// Simulation pass over all springs
+	void SimulateSpringsOnce(const FComponentSpacePoseContext& Context, const FTransform& ComponentTM, float DeltaTime);
 
-	// verlet + external forces (stiffness/gravity)
-	static FVector IntegrateVerlet(
-		const FVRMSimJointState& S,
-		const FVector& WorldSpaceBoneAxis,
-		const FMatrix44f& CenterToWorld,
-		float Stiffness, float Drag, const FVector& GravityDirWS, float GravityPower, float DeltaTime);
+	// Collision resolution against configured collider groups
+	void ResolveCollisions(const FComponentSpacePoseContext& Context,
+	                       FVector& NextTailWS,
+	                       float JointRadius,
+	                       const FVRMSpringConfig& SpringCfg,
+	                       FCSPose<FCompactPose>& CSPose,
+	                       const FTransform& ComponentTM,
+	                       const TArray<int32>& GroupIndices) const;
 
-	// collision helpers (spec + extended colliders)
-	void ResolveCollisions(
-		FVector& NextTailWS,
-		float JointRadius,
-		const FVRMSpringConfig& Cfg,
-		const FCSPose<FCompactPose>& CSPose,
-		const FTransform& ComponentTM,
-		const TArray<int32>& GroupIndices) const;
+	/* ---- Collision primitive helpers (signed distance; <0 = penetration) ---- */
+	float CollideSphere(const FTransform& NodeXf, const struct FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const;
+	float CollideInsideSphere(const FTransform& NodeXf, const struct FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const;
+	float CollideCapsule(const FTransform& NodeXf, const struct FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const;
+	float CollideInsideCapsule(const FTransform& NodeXf, const struct FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const;
+	float CollidePlane(const FTransform& NodeXf, const struct FVRMSpringColliderPlane& P, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const;
 
-	// per-shape collide
-	static float CollideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& S, const FVector& TailWS, float JointRadius, FVector& OutPushDir);
-	static float CollideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& C, const FVector& TailWS, float JointRadius, FVector& OutPushDir);
-	static float CollideInsideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& S, const FVector& TailWS, float JointRadius, FVector& OutPushDir);
-	static float CollideInsideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& C, const FVector& TailWS, float JointRadius, FVector& OutPushDir);
-	static float CollidePlane(const FTransform& NodeXf, const FVRMSpringColliderPlane& P, const FVector& TailWS, float JointRadius, FVector& OutPushDir);
+#if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
+	// Debug draw helpers
+	void DrawCollisionSphere(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const struct FVRMSpringColliderSphere& S) const;
+	void DrawCollisionCapsule(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const struct FVRMSpringColliderCapsule& Cap) const;
+	void DrawCollisionPlane(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const struct FVRMSpringColliderPlane& P) const;
+	// Draw per-joint spring visuals: head, tail, optional velocity and animated-rest target
+	void DrawSpringJoint(const FComponentSpacePoseContext& Context, const FTransform& ComponentTM, const FVRMSimJointState& JointState, const FVector& HeadCS, const FVector& TailCS, float JointRadius, const FVector& RestTargetCS, float DeltaTime) const;
+#endif
 
-	// apply rotation from tail dir (TS: fromToQuaternion of boneAxis->to)
-	static FQuat ComputeLocalFromTail(
-		const FVRMSimJointState& S,
-		const FVector& NextTailWS,
-		const FMatrix44f& ParentWorldXf,
-		const FMatrix44f& InitialLocalMatrix);
+private:
+	/* ---- Runtime data ---- */
+	TArray<FBoneReference>     JointBoneRefs;
+	TArray<FVRMSimJointState>  JointStates;
+	TArray<FSpringChainRange>  SpringChainRanges;
+	TArray<FBoneWrite>         PendingBoneWrites;
+
+	float CurrentDeltaTime = 0.f;
+	bool  bEvalCalledThisFrame = false;
 };

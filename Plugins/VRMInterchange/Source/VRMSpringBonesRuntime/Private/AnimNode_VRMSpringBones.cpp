@@ -1,73 +1,103 @@
 #include "AnimNode_VRMSpringBones.h"
-#include "AnimationRuntime.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
+
+/* ============================================================================
+ *  VRM Spring Bones Runtime - Core Simulation Node Implementation
+ * ============================================================================ */
+
+#if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
+#define VRMSB_DRAW_SPHERE(Context, NodeXf, S) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionSphere(Context, NodeXf, S)
+#define VRMSB_DRAW_CAPSULE(Context, NodeXf, Cap) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionCapsule(Context, NodeXf, Cap)
+#define VRMSB_DRAW_PLANE(Context, NodeXf, P) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionPlane(Context, NodeXf, P)
+static TAutoConsoleVariable<int32> CVarVRMSB_DrawColliders(
+	TEXT("vrm.SpringBones.DrawColliders"),
+	0,
+	TEXT("Draw debug spring bone colliders.\n")
+	TEXT("0 = off, 1 = on."),
+	ECVF_Default);
+
+static TAutoConsoleVariable<int32> CVarVRMSB_DrawSprings(
+	TEXT("vrm.SpringBones.DrawSprings"),
+	0,
+	TEXT("Draw debug spring joints.\n")
+	TEXT("0 = off, 1 = head/tail, 2 = +velocity trail, 3 = +animated target"),
+	ECVF_Default);
+
+#define VRMSB_DRAW_SPRING(Context, ComponentTM, JointState, HeadCS, TailCS, JointRadius, RestTargetCS, Dt) \
+    if (CVarVRMSB_DrawSprings.GetValueOnAnyThread() != 0) DrawSpringJoint(Context, ComponentTM, JointState, HeadCS, TailCS, JointRadius, RestTargetCS, Dt)
+#else
+#define VRMSB_DRAW_SPHERE(Context, NodeXf, S) ((void)0)
+#define VRMSB_DRAW_CAPSULE(Context, NodeXf, Cap) ((void)0)
+#define VRMSB_DRAW_PLANE(Context, NodeXf, P) ((void)0)
+#define VRMSB_DRAW_SPRING(Context, ComponentTM, JointState, HeadCS, TailCS, JointRadius, RestTargetCS, Dt) ((void)0)
+#endif
 
 #define LOCTEXT_NAMESPACE "AnimNode_VRMSpringBones"
 
-// -------------------- FAnimNode_VRMSpringBones --------------------
+/* ---------------------------------------------------------------------------
+ *  Static helpers
+ * --------------------------------------------------------------------------- */
+
+FVector FAnimNode_VRMSpringBones::ApplyLengthConstraint(const FVRMSimJointState& State, const FVector TailWS, const FVector HeadWS)
+{
+	const FVector Dir = (TailWS - HeadWS).GetSafeNormal();
+	if (!Dir.IsNearlyZero())
+	{
+		return HeadWS + Dir * State.WorldBoneLength;
+	}
+	return TailWS;
+}
+
+/** One-time per joint state initialization (tail, previous frame data). */
+void FAnimNode_VRMSpringBones::InitializeState(FVRMSimJointState& JointState, const FTransform& ComponentTM, const FTransform& JointBoneCS)
+{
+	if (!JointState.bInitialized)
+	{
+		const FQuat JointBoneRotCS = JointBoneCS.GetRotation();
+		const FVector JointHeadPosCS = JointBoneCS.GetLocation();
+
+		JointState.PrevHeadCS = JointHeadPosCS;
+
+		const FVector InitialJointTailPosCS = JointHeadPosCS + JointBoneRotCS.RotateVector(FVector(JointState.InitialLocalChildPos));
+		JointState.CurrentTail = InitialJointTailPosCS;
+		JointState.PrevTail = InitialJointTailPosCS;
+
+		JointState.bInitialized = 1;
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ *  FAnimNode_VRMSpringBones overrides
+ * --------------------------------------------------------------------------- */
 
 void FAnimNode_VRMSpringBones::Initialize_AnyThread(const FAnimationInitializeContext& Context)
 {
 	Super::Initialize_AnyThread(Context);
 	JointBoneRefs.Reset();
 	JointStates.Reset();
-	SpringRanges.Reset();
+	SpringChainRanges.Reset();
 	PendingBoneWrites.Reset();
-	LastSimTickId = 0;
 }
 
 void FAnimNode_VRMSpringBones::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
 {
 	Super::CacheBones_AnyThread(Context);
-	if (!SpringData || !SpringData->SpringConfig.IsValid()) { return; }
+	if (!SpringData || !SpringData->SpringConfig.IsValid()) return;
 	BuildMappings(Context.AnimInstanceProxy->GetRequiredBones());
+}
+
+void FAnimNode_VRMSpringBones::UpdateInternal(const FAnimationUpdateContext& Context)
+{
+	Super::UpdateInternal(Context);
+	CurrentDeltaTime = Context.GetDeltaTime();
+	bEvalCalledThisFrame = false;
 }
 
 bool FAnimNode_VRMSpringBones::IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones)
 {
 	return bEnable && SpringData && SpringData->SpringConfig.IsValid();
-}
-
-void FAnimNode_VRMSpringBones::Update_AnyThread(const FAnimationUpdateContext& Context)
-{
-	Super::Update_AnyThread(Context);
-	if (!bEnable || !SpringData || !SpringData->SpringConfig.IsValid()) { return; }
-
-	// guard: if someone evaluates multiple times in a frame, do verlet once
-	const uint64 TickId = Context.AnimInstanceProxy->GetFrameNumber();
-	if (LastSimTickId == TickId) { return; }
-	LastSimTickId = TickId;
-
-	// Build component-space pose snapshot for this frame
-	FComponentSpacePoseContext CSPC(Context);
-	// We only need current CSPose for reading head/parent/world matrices; not writing
-	EvaluateComponentSpaceGraph(CSPC);
-
-	const FBoneContainer& BoneContainer = CSPC.Pose.GetPose().GetBoneContainer();
-	const FTransform ComponentTM = Context.AnimInstanceProxy->GetComponentTransform();
-
-	EnsureStatesInitialized(BoneContainer, ComponentTM);
-	PendingBoneWrites.Reset();
-
-	const float Dt = bPauseSimulation ? 0.f : (Context.GetDeltaTime() * TimeScale);
-	SimulateSpringsOnce(BoneContainer, ComponentTM, Dt);
-
-	// After Update, PendingBoneWrites holds local-space target rotations for Evaluate to apply
-}
-
-void FAnimNode_VRMSpringBones::EvaluateComponentSpaceInternal(FComponentSpacePoseContext& Context)
-{
-	// Apply cached rotations (local space) to OutBoneTransforms for SkeletalControlBase
-	if (!bEnable || PendingBoneWrites.Num() == 0) { return; }
-
-	// Convert local-space rotations to component-space transforms for each bone
-	for (const FBoneWrite& W : PendingBoneWrites)
-	{
-		if (!W.BoneIndex.IsValid()) { continue; }
-		FTransform NewLocal(Context.Pose.GetLocalSpaceTransform(W.BoneIndex));
-		NewLocal.SetRotation(FQuat(W.NewLocalRot));
-		Context.Pose.SetLocalSpaceTransform(W.BoneIndex, NewLocal);
-	}
 }
 
 void FAnimNode_VRMSpringBones::GatherDebugData(FNodeDebugData& DebugData)
@@ -76,411 +106,571 @@ void FAnimNode_VRMSpringBones::GatherDebugData(FNodeDebugData& DebugData)
 	DebugData.AddDebugItem(FString::Printf(TEXT("VRMSpringBones: %d writes"), PendingBoneWrites.Num()));
 }
 
-// -------------------- mappings & state --------------------
+/* ---------------------------------------------------------------------------
+ *  Mapping / joint state preparation
+ * --------------------------------------------------------------------------- */
 
 void FAnimNode_VRMSpringBones::BuildMappings(const FBoneContainer& BoneContainer)
 {
 	JointBoneRefs.Reset();
-	SpringRanges.Reset();
+	SpringChainRanges.Reset();
 
-	const FVRMSpringConfig& Cfg = SpringData->SpringConfig;
+	const FVRMSpringConfig& SpringCfg = SpringData->SpringConfig;
 
-	// Build bone refs for every joint in import order; record ranges per spring
-	JointBoneRefs.SetNum(Cfg.Joints.Num());
-	for (int32 J = 0; J < Cfg.Joints.Num(); ++J)
+	JointBoneRefs.SetNum(SpringCfg.Joints.Num());
+	for (int32 J = 0; J < SpringCfg.Joints.Num(); ++J)
 	{
-		const FName BoneName = (Cfg.Joints[J].BoneName.IsNone() && Cfg.Joints[J].NodeIndex != INDEX_NONE)
-			? SpringData->GetBoneNameForNode(Cfg.Joints[J].NodeIndex)
-			: Cfg.Joints[J].BoneName;
+		const FName BoneName = (SpringCfg.Joints[J].BoneName.IsNone() && SpringCfg.Joints[J].NodeIndex != INDEX_NONE)
+			? SpringData->GetBoneNameForNode(SpringCfg.Joints[J].NodeIndex)
+			: SpringCfg.Joints[J].BoneName;
+
 		FBoneReference Ref; Ref.BoneName = BoneName; Ref.Initialize(BoneContainer);
 		JointBoneRefs[J] = Ref;
 	}
 
-	SpringRanges.SetNum(Cfg.Springs.Num());
+	SpringChainRanges.SetNum(SpringCfg.Springs.Num());
 	int32 Cursor = 0;
-	for (int32 SIdx = 0; SIdx < Cfg.Springs.Num(); ++SIdx)
+	for (int32 SIdx = 0; SIdx < SpringCfg.Springs.Num(); ++SIdx)
 	{
-		const FVRMSpring& S = Cfg.Springs[SIdx];
-		FSpringRange R;
-		R.First = Cursor;
-		R.Num = S.JointIndices.Num();
-		// center is specified per-spring in VRM spec
-		R.CenterJointIndex = INDEX_NONE;
-		if (S.CenterNodeIndex != INDEX_NONE)
-		{
-			// find any joint that refers to this center node to get its bone
-			for (int32 J = 0; J < Cfg.Joints.Num(); ++J)
-			{
-				if (Cfg.Joints[J].NodeIndex == S.CenterNodeIndex) { R.CenterJointIndex = J; break; }
-			}
-		}
-		SpringRanges[SIdx] = R;
-		Cursor += R.Num;
+		const FVRMSpring& Spring = SpringCfg.Springs[SIdx];
+		FSpringChainRange SpringChainRng;
+		SpringChainRng.First = Cursor;
+		SpringChainRng.Num = Spring.JointIndices.Num();
+		SpringChainRanges[SIdx] = SpringChainRng;
+		Cursor += SpringChainRng.Num;
 	}
 }
 
-void FAnimNode_VRMSpringBones::EnsureStatesInitialized(const FBoneContainer& BoneContainer, const FTransform& ComponentTM)
+void FAnimNode_VRMSpringBones::EnsureStatesInitialized(const FBoneContainer& BoneContainer, FCSPose<FCompactPose>& CSPose)
 {
-	if (JointStates.Num() == JointBoneRefs.Num()) { return; }
+	if (JointStates.Num() == JointBoneRefs.Num()) return;
+
+	const FVRMSpringConfig& SpringCfg = SpringData->SpringConfig;
+
+	TMap<int32,int32> JointToSpring;
+	for (int32 SpringIdx = 0; SpringIdx < SpringChainRanges.Num(); ++SpringIdx)
+	{
+		const FSpringChainRange& SpringChainRng = SpringChainRanges[SpringIdx];
+		for (int32 i=0;i<SpringChainRng.Num;++i)
+		{
+			const int32 JointIdx = SpringCfg.Springs[SpringIdx].JointIndices[i];
+			JointToSpring.Add(JointIdx,SpringIdx);
+		}
+	}
 
 	JointStates.SetNum(JointBoneRefs.Num());
-	// Initialize per spec: cache initial local matrix/rotation and bone axis
-	for (int32 J = 0; J < JointBoneRefs.Num(); ++J)
+
+	for (int32 JointIdx = 0; JointIdx < JointBoneRefs.Num(); ++JointIdx)
 	{
-		FVRMSimJointState& S = JointStates[J];
+		const FBoneReference& BoneRef = JointBoneRefs[JointIdx];
+		if (!BoneRef.HasValidSetup()) continue;
 
-		const FBoneReference& Ref = JointBoneRefs[J];
-		if (!Ref.HasValidSetup()) { continue; }
-		const FCompactPoseBoneIndex B = Ref.GetCompactPoseIndex(BoneContainer);
+		FVRMSimJointState& JointState = JointStates[JointIdx];
+		const FCompactPoseBoneIndex BoneIdx = BoneRef.GetCompactPoseIndex(BoneContainer);
 
-		// read current local transform
-		// We need a CSPose to compute world; fetch from current proxy pose
-		// Caller guarantees EnsureStatesInitialized is invoked from Update after EvaluateComponentSpaceGraph
-		// (we pass CSPose via SimulateSpringsOnce; here we just fill static rest data, so safe to leave zero—filled later)
-		S.InitialLocalRot = FQuat4f::Identity;
-		S.InitialLocalMatrix = FMatrix44f::Identity;
-		S.LocalBoneAxis = FVector(1,0,0); // will be set at first sim frame
-		S.WorldBoneLength = 0.f;
-		// Tails (center-space) are set lazily on first Sim
+		const FTransform BoneCS = CSPose.GetComponentSpaceTransform(BoneIdx);
+
+		// Parent
+		FTransform ParentCS = FTransform::Identity;
+		const FCompactPoseBoneIndex ParentIdx = BoneContainer.GetParentBoneIndex(BoneIdx);
+		if (ParentIdx.IsValid())
+		{
+			ParentCS = CSPose.GetComponentSpaceTransform(ParentIdx);
+		}
+
+		const FTransform LocalRest = BoneCS.GetRelativeTransform(ParentCS);
+
+		const FVector HeadCS = BoneCS.GetLocation();
+
+		FVector ChildCS;
+		bool bHasRealChild = false;
+		if (const int32* SpringIdxPtr = JointToSpring.Find(JointIdx))
+		{
+			const FVRMSpring& Spring = SpringCfg.Springs[*SpringIdxPtr];
+			const FSpringChainRange& SpringChainRng = SpringChainRanges[*SpringIdxPtr];
+			for (int32 i=0;i<SpringChainRng.Num-1;++i)
+			{
+				if (Spring.JointIndices[i] == JointIdx)
+				{
+					const int32 ChildJoint = Spring.JointIndices[i+1];
+					if (JointBoneRefs.IsValidIndex(ChildJoint))
+					{
+						const FBoneReference& ChildBoneRef = JointBoneRefs[ChildJoint];
+						if (ChildBoneRef.HasValidSetup())
+						{
+							const FCompactPoseBoneIndex ChildIdx = ChildBoneRef.GetCompactPoseIndex(BoneContainer);
+							ChildCS = CSPose.GetComponentSpaceTransform(ChildIdx).GetLocation();
+							bHasRealChild = true;
+						}
+					}
+					break;
+				}
+			}
+		}
+
+		if (bHasRealChild)
+		{
+			const FVector AxisCS = (ChildCS - HeadCS).GetSafeNormal();
+			const FQuat LocalInv = LocalRest.GetRotation().Inverse();
+			JointState.BoneAxisLocal = LocalInv.RotateVector(AxisCS).GetSafeNormal();
+			JointState.WorldBoneLength = (ChildCS - HeadCS).Length();
+			JointState.InitialLocalChildPos = LocalRest.InverseTransformPosition(ChildCS - ParentCS.GetLocation());
+		}
+		else
+		{
+			// Derive a reasonable axis from the parent->this direction if possible; fallback to this joint's rest forward.
+			const float VirtualTailLengthCm = 0.07f * 100.f; // 7 cm in UE units (centimeters)
+
+			FVector AxisCS = FVector::ZeroVector;
+			// If we have a valid parent bone transform, use the incoming chain segment direction
+			if (ParentIdx.IsValid())
+			{
+				const FVector ParentHeadCS = ParentCS.GetLocation();
+				AxisCS = (HeadCS - ParentHeadCS).GetSafeNormal();
+			}
+			// Fallback: use this bone's rest rotation forward (+X in local space rotated into component space)
+			if (AxisCS.IsNearlyZero())
+			{
+				AxisCS = BoneCS.GetRotation().RotateVector(FVector(1,0,0)).GetSafeNormal();
+			}
+			if (AxisCS.IsNearlyZero())
+			{
+				AxisCS = FVector(1,0,0); // Final safety fallback
+			}
+
+			// Convert component-space axis into the joint's local space (same pattern as real-child branch)
+			const FQuat LocalInv = LocalRest.GetRotation().Inverse();
+			JointState.BoneAxisLocal = LocalInv.RotateVector(AxisCS).GetSafeNormal();
+			if (!JointState.BoneAxisLocal.IsNormalized())
+			{
+				JointState.BoneAxisLocal = FVector(1,0,0);
+			}
+
+			JointState.WorldBoneLength = VirtualTailLengthCm;
+
+			// Build a virtual child position in component space to derive InitialLocalChildPos consistently.
+			const FVector VirtualChildCS = HeadCS + AxisCS * VirtualTailLengthCm;
+			// Child (or virtual child) expressed relative to parent CS then into this bone's local space:
+			JointState.InitialLocalChildPos = LocalRest.InverseTransformPosition(VirtualChildCS - ParentCS.GetLocation());
+		}
+
+		JointState.CurrentTail = HeadCS + BoneCS.GetRotation().RotateVector(FVector(JointState.InitialLocalChildPos));
+		JointState.PrevTail    = JointState.CurrentTail;
 	}
 }
 
-// -------------------- simulation once per frame --------------------
+/* ---------------------------------------------------------------------------
+ *  Simulation
+ * --------------------------------------------------------------------------- */
 
-void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FBoneContainer& BoneContainer, const FTransform& ComponentTM, float DeltaTime)
+void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseContext& Context,
+                                                   const FTransform& ComponentTM,
+                                                   const float DeltaTime)
 {
-	const FVRMSpringConfig& Cfg = SpringData->SpringConfig;
-
-	// Build a component-space pose snapshot for queries
-	// We already evaluated a CSPose in Update to build dt; rebuild here in this context
-	FCSPose<FCompactPose> CSPose;
-	CSPose.InitPose(BoneContainer);
-
-	// Build a read-only CSPose from current AnimInstance proxy
-	{
-		// Slight trick: Pose snapshot is already current because Update built one immediately before.
-		// If this node was the only control, CSPose can be reconstructed via component + current mesh, but
-		// in a typical graph, using Context CSPose is the way; for this isolated snippet, we assume CSPose was init'ed externally.
-	}
-
-	// Prepare output write cache
+	FCSPose<FCompactPose> CSPose = Context.Pose;
+	const FVRMSpringConfig& SpringCfg = SpringData->SpringConfig;
 	PendingBoneWrites.Reset();
 
-	// Iterate springs in import order (root -> descendants) as spec suggests dependency order
-	for (int32 SIdx = 0; SIdx < SpringRanges.Num(); ++SIdx)
+	const FBoneContainer& BoneContainer = CSPose.GetPose().GetBoneContainer();
+
+	for (int32 SpringIdx = 0; SpringIdx < SpringChainRanges.Num(); ++SpringIdx)
 	{
-		const FSpringRange& R = SpringRanges[SIdx];
-		if (R.First == INDEX_NONE || R.Num <= 0) { continue; }
+		const FSpringChainRange& SpringChainRng = SpringChainRanges[SpringIdx];
+		if (SpringChainRng.Num <= 0) continue;
+		const FVRMSpring& Spring = SpringCfg.Springs[SpringIdx];
 
-		// Center space transform
-		TOptional<FCompactPoseBoneIndex> CenterBoneIdx;
-		if (R.CenterJointIndex != INDEX_NONE && JointBoneRefs.IsValidIndex(R.CenterJointIndex))
+		const float Stiffness      = Spring.Stiffness;
+		const float Drag           = FMath::Clamp(Spring.Drag, 0.f, 1.f);
+		const float GravityPower   = Spring.GravityPower * 100.0f;
+		const bool  bHasColliders  = Spring.ColliderGroupIndices.Num() > 0;
+		const FVector GravityDir   = Spring.GravityDir;
+		const float DefaultHitRadius = FMath::Max(0.f, Spring.HitRadius * 100.0f);
+
+		for (int32 ChainPos = 0; ChainPos < SpringChainRng.Num; ++ChainPos)
 		{
-			const FBoneReference& CRef = JointBoneRefs[R.CenterJointIndex];
-			if (CRef.HasValidSetup()) { CenterBoneIdx = CRef.GetCompactPoseIndex(BoneContainer); }
-		}
-		const FMatrix44f CenterToWorld = GetCenterToWorldMatrix(CSPose, CenterBoneIdx);
-		const FMatrix44f WorldToCenter = GetWorldToCenterMatrix(CenterToWorld);
+			const bool bIsSpringRoot = (ChainPos == 0);
+			const int32 JointIndex = Spring.JointIndices[ChainPos];
+			if (!JointBoneRefs.IsValidIndex(JointIndex)) continue;
 
-		// Spring tunables
-		const FVRMSpring& Spring = Cfg.Springs[SIdx];
-		const float Stiff   = FMath::Max(0.f, Spring.Stiffness);
-		const float Drag    = FMath::Clamp(Spring.Drag, 0.f, 1.f);
-		const FVector GravN = Spring.GravityDir.IsNearlyZero() ? FVector::ZeroVector : Spring.GravityDir.GetSafeNormal();
-		const float GravPw  = FMath::Max(0.f, Spring.GravityPower);
-		const float DefaultHitRadius = FMath::Max(0.f, Spring.HitRadius);
+			const FBoneReference& JointBoneRef = JointBoneRefs[JointIndex];
+			if (!JointBoneRef.HasValidSetup()) continue;
 
-		// walk chain pairs Head->Tail just like the TS class does per joint
-		for (int32 i = 0; i < R.Num; ++i)
-		{
-			const int32 JointIndex = Cfg.Springs[SIdx].JointIndices[i];
-			if (!JointBoneRefs.IsValidIndex(JointIndex)) { continue; }
-			const FBoneReference& Ref = JointBoneRefs[JointIndex];
-			if (!Ref.HasValidSetup()) { continue; }
-			const FCompactPoseBoneIndex BoneIdx = Ref.GetCompactPoseIndex(BoneContainer);
+			FVRMSimJointState& JointState = JointStates[JointIndex];
+			FVRMSimJointState& ParentState = bIsSpringRoot ? JointState : JointStates[Spring.JointIndices[ChainPos-1]];
+			const FCompactPoseBoneIndex JointBoneIdx = JointBoneRef.GetCompactPoseIndex(BoneContainer);
 
-			// Child detection: in VRM the last joint in a chain has no params and only acts as a Tail
-			const bool bHasRealChild = (i + 1 < R.Num);
-			const float JointRadius = (Cfg.Joints.IsValidIndex(JointIndex) && Cfg.Joints[JointIndex].HitRadius > 0.f)
-				? Cfg.Joints[JointIndex].HitRadius
-				: DefaultHitRadius;
-
-			// cache state refs
-			FVRMSimJointState& S = JointStates[JointIndex];
-
-			// parent world, head pos, child pos (or 7cm fake for vrm0 per spec)
-			const FMatrix44f ParentWorld = GetParentWorldMatrix(ComponentTM, CSPose, BoneIdx);
-			const FVector HeadWS  = CalcWorldHeadPos(CSPose, BoneIdx);
-			const FVector ChildWS = CalcWorldChildPos_OrPseudo(CSPose, S, BoneIdx, bHasRealChild);
-			CalcWorldBoneLength(S, HeadWS, ChildWS);
-
-			// world-space bone axis (InitialLocalMatrix * parentWorld)
-			// lazy initialize initial local matrix/rot and axis on first tick
-			if (S.InitialLocalMatrix == FMatrix44f::Identity)
+			FTransform ParentBoneCS = FTransform::Identity;
+			const FCompactPoseBoneIndex ParentBoneIdx = BoneContainer.GetParentBoneIndex(JointBoneIdx);
+			if (ParentBoneIdx.IsValid())
 			{
-				const FTransform LocalXf = CSPose.GetLocalSpaceTransform(BoneIdx);
-				S.InitialLocalRot    = FQuat4f(LocalXf.GetRotation());
-				S.InitialLocalMatrix = FMatrix44f(LocalXf.ToMatrixWithScale());
-				// if we have a child, bone axis is to child in local; else infer from local position
-				if (bHasRealChild)
-				{
-					const int32 ChildJointIdx = Cfg.Springs[SIdx].JointIndices[i+1];
-					if (JointBoneRefs.IsValidIndex(ChildJointIdx))
-					{
-						const FCompactPoseBoneIndex ChildIdx = JointBoneRefs[ChildJointIdx].GetCompactPoseIndex(BoneContainer);
-						const FVector ChildLocal = CSPose.GetLocalSpaceTransform(ChildIdx).GetLocation();
-						S.LocalBoneAxis = ChildLocal.GetSafeNormal(FVector(1,0,0));
-					}
-				}
-				// initialize tails (center space)
-				const FVector TailWS_Init = ChildWS;
-				S.CurrentTail = FVector( WorldToCenter.TransformPosition((FVector3f)TailWS_Init) );
-				S.PrevTail    = S.CurrentTail;
+				ParentBoneCS = CSPose.GetComponentSpaceTransform(ParentBoneIdx);
 			}
 
-			// compute world-space axis from local axis through (initialLocal * parentWorld), per ref impl
-			const FVector AxisWS = (FVector)FVector3f(S.LocalBoneAxis).GetSafeNormal();
-			FVector AxisWS_xform = AxisWS;
+			const FTransform JointBoneCS = CSPose.GetComponentSpaceTransform(JointBoneIdx);
+
+			InitializeState(JointState, ComponentTM, JointBoneCS);
+
+			const FVector CurrentHeadPosCS = bIsSpringRoot ? JointBoneCS.GetTranslation() : ParentState.PrevTail;
+
+			FVector Inertia = (JointState.CurrentTail - JointState.PrevTail) * (1.f - Drag);
+			FVector Gravity = GravityDir * GravityPower * DeltaTime;
+
+			const FQuat AnimatedBoneRotCS = JointBoneCS.GetRotation();
+			const FVector RestTargetCS = CurrentHeadPosCS + AnimatedBoneRotCS.RotateVector(JointState.InitialLocalChildPos);
+
+			FVector SimTailPos = JointState.CurrentTail + Inertia + Gravity;
+			if (!RestTargetCS.ContainsNaN())
 			{
-				// transformDirection(initialLocal) then transformDirection(parentWorld)  (like TS)
-				const FMatrix44f InitLoc = S.InitialLocalMatrix;
-				FVector3f Dir = FVector3f(AxisWS);
-				Dir = InitLoc.TransformVector(Dir);
-				Dir = ParentWorld.TransformVector(Dir);
-				AxisWS_xform = (FVector)Dir.GetSafeNormal();
+				const float StiffScale = Stiffness * DeltaTime;
+				SimTailPos += (RestTargetCS - SimTailPos) * StiffScale;
 			}
 
-			// verlet
-			FVector NextTailWS = IntegrateVerlet(S, AxisWS_xform, CenterToWorld, Stiff, Drag, GravN, GravPw, DeltaTime);
+			JointState.PrevHeadCS = CurrentHeadPosCS;
 
-			// constrain length
-			NextTailWS = HeadWS + (NextTailWS - HeadWS).GetSafeNormal(S.WorldBoneLength) * S.WorldBoneLength;
+			const FVector PostSimHeadPos = JointState.PrevHeadCS;
+			const FQuat   BoneRotCS = JointBoneCS.GetRotation();
+			FVector PostSimTailPositionFixed = ApplyLengthConstraint(JointState, SimTailPos, PostSimHeadPos);
 
-			// collisions (groups attached to this spring)
-			ResolveCollisions(NextTailWS, JointRadius, Cfg, CSPose, ComponentTM, Spring.ColliderGroupIndices);
+			if (bHasColliders)
+			{
+				const float JointHitRadius = (JointState.WorldBoneLength <= KINDA_SMALL_NUMBER)
+					? DefaultHitRadius
+					: FMath::Min(DefaultHitRadius, JointState.WorldBoneLength * 0.5f);
+				FVector NextTailWS = ComponentTM.TransformPosition(PostSimTailPositionFixed);
+				ResolveCollisions(Context, NextTailWS, JointHitRadius, SpringCfg, CSPose, ComponentTM, Spring.ColliderGroupIndices);
+				PostSimTailPositionFixed = ComponentTM.InverseTransformPosition(NextTailWS);
+			}
 
-			// renormalize length after each collision
-			NextTailWS = HeadWS + (NextTailWS - HeadWS).GetSafeNormal(S.WorldBoneLength) * S.WorldBoneLength;
+			const FVector PostCollideHeadPos = JointState.PrevHeadCS;
+			FVector PostCollideTailPositionFixed = ApplyLengthConstraint(JointState, PostSimTailPositionFixed, PostCollideHeadPos);
 
-			// update tail states (center-space)
-			S.PrevTail    = S.CurrentTail;
-			const FVector NextTailCenter = FVector( GetWorldToCenterMatrix(CenterToWorld).TransformPosition((FVector3f)NextTailWS) );
-			S.CurrentTail = NextTailCenter;
+			JointState.PrevTail = JointState.CurrentTail;
+			JointState.CurrentTail = PostCollideTailPositionFixed;
 
-			// compute new local rotation from axis-> to
-			const FQuat NewLocal = ComputeLocalFromTail(S, NextTailWS, ParentWorld, S.InitialLocalMatrix);
+			const FVector AxisCS = BoneRotCS.RotateVector(JointState.BoneAxisLocal);
+			const FVector TargetDir = (PostCollideTailPositionFixed - PostCollideHeadPos).GetSafeNormal();
+			const bool bLenNearlyZero = (PostCollideTailPositionFixed - PostCollideHeadPos).IsNearlyZero();
+			const FQuat PostCollideBoneRotCS = bLenNearlyZero ? BoneRotCS : FQuat::FindBetweenVectors(AxisCS, TargetDir) * BoneRotCS;
 
-			// stage for Evaluate
-			PendingBoneWrites.Add({ BoneIdx, NewLocal });
+			// Compute joint radius for drawing (matches collision calculation)
+			const float JointHitRadiusForDraw = (JointState.WorldBoneLength <= KINDA_SMALL_NUMBER)
+				? DefaultHitRadius
+				: FMath::Min(DefaultHitRadius, JointState.WorldBoneLength * 0.5f);
+
+			// Debug draw per-joint
+			VRMSB_DRAW_SPRING(Context, ComponentTM, JointState, PostCollideHeadPos, PostCollideTailPositionFixed, JointHitRadiusForDraw, RestTargetCS, DeltaTime);
+
+			PendingBoneWrites.Add({ JointBoneIdx, PostCollideHeadPos, PostCollideBoneRotCS });
 		}
 	}
 }
 
-// -------------------- math helpers --------------------
+/* ---------------------------------------------------------------------------
+ *  Evaluation
+ * --------------------------------------------------------------------------- */
 
-FMatrix44f FAnimNode_VRMSpringBones::GetParentWorldMatrix(const FTransform& ComponentTM, const FCSPose<FCompactPose>& CSPose, FCompactPoseBoneIndex BoneIdx)
+void FAnimNode_VRMSpringBones::EvaluateSkeletalControl_AnyThread(
+	FComponentSpacePoseContext& Context,
+	TArray<FBoneTransform>& OutBoneTransforms)
 {
-	const FCompactPoseBoneIndex ParentIdx = CSPose.GetPose().GetBoneContainer().GetParentBoneIndex(BoneIdx);
-	if (ParentIdx.IsValid())
+	if (bEvalCalledThisFrame) return;
+	if (!bEnable || !SpringData || !SpringData->SpringConfig.IsValid()) return;
+	if (FMath::IsNearlyZero(CurrentDeltaTime)) return;
+
+	const FBoneContainer& BoneContainer = Context.Pose.GetPose().GetBoneContainer();
+	const FTransform ComponentTM = Context.AnimInstanceProxy->GetComponentTransform();
+
+	EnsureStatesInitialized(BoneContainer, Context.Pose);
+	PendingBoneWrites.Reset();
+
+	const float Dt = bPauseSimulation ? 0.f : CurrentDeltaTime;
+	SimulateSpringsOnce(Context, ComponentTM, Dt);
+
+	OutBoneTransforms.Reset();
+	OutBoneTransforms.Reserve(PendingBoneWrites.Num());
+	if (PendingBoneWrites.Num() == 0) return;
+
+	PendingBoneWrites.Sort([](const FBoneWrite& A, const FBoneWrite& B)
 	{
-		const FTransform P = CSPose.GetComponentSpaceTransform(ParentIdx);
-		return FMatrix44f( (P.ToMatrixWithScale()) );
-	}
-	return FMatrix44f( (ComponentTM.ToMatrixWithScale()) ); // root parent = component
-}
+		return A.BoneIndex.GetInt() < B.BoneIndex.GetInt();
+	});
 
-FVector FAnimNode_VRMSpringBones::CalcWorldHeadPos(const FCSPose<FCompactPose>& CSPose, FCompactPoseBoneIndex BoneIdx)
-{
-	return CSPose.GetComponentSpaceTransform(BoneIdx).GetLocation();
-}
-
-FVector FAnimNode_VRMSpringBones::CalcWorldChildPos_OrPseudo(const FCSPose<FCompactPose>& CSPose, const FVRMSimJointState& S, FCompactPoseBoneIndex BoneIdx, bool bHasRealChild)
-{
-	if (bHasRealChild)
+	for (const FBoneWrite& BW : PendingBoneWrites)
 	{
-		// if caller knows child index, they should pass it—here we approximate by reading first child in skeleton
-		// For correctness we passed child via chain walk earlier; fall back to head if unknown
-		return CSPose.GetComponentSpaceTransform(BoneIdx).GetLocation(); // replaced per-chain logic earlier
+		FTransform NewCS = FTransform(BW.NewRotation, BW.NewPosition, FVector(1, 1, 1));
+		OutBoneTransforms.Add(FBoneTransform(BW.BoneIndex, NewCS));
 	}
-	// vrm0: 7cm fixed child if final joint
-	// The TS impl also does this fallback for VRM0 final node. (see setInitState comment in TS)
-	const FVector HeadWS = CSPose.GetComponentSpaceTransform(BoneIdx).GetLocation();
-	const FVector DirWS  = CSPose.GetLocalSpaceTransform(BoneIdx).GetLocation().GetSafeNormal(FVector(0,0,1));
-	return HeadWS + 0.07f * DirWS; // meters
-}
 
-void FAnimNode_VRMSpringBones::CalcWorldBoneLength(FVRMSimJointState& S, const FVector& HeadWS, const FVector& ChildWS)
-{
-	S.WorldBoneLength = (HeadWS - ChildWS).Length();
-}
-
-FMatrix44f FAnimNode_VRMSpringBones::GetCenterToWorldMatrix(const FCSPose<FCompactPose>& CSPose, TOptional<FCompactPoseBoneIndex> CenterIdx)
-{
-	if (CenterIdx.IsSet())
+	if (OutBoneTransforms.Num() > 1)
 	{
-		const FTransform C = CSPose.GetComponentSpaceTransform(CenterIdx.GetValue());
-		return FMatrix44f(C.ToMatrixWithScale());
+		OutBoneTransforms.Sort(FCompareBoneTransformIndex());
 	}
-	return FMatrix44f::Identity;
+	bEvalCalledThisFrame = true;
 }
 
-FMatrix44f FAnimNode_VRMSpringBones::GetWorldToCenterMatrix(const FMatrix44f& C2W)
+/* ---------------------------------------------------------------------------
+ *  Debug drawing
+ * --------------------------------------------------------------------------- */
+#if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
+void FAnimNode_VRMSpringBones::DrawCollisionSphere(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderSphere& S) const
 {
-	FMatrix44f Inv = C2W;
-	Inv.SetIdentity();
-	if (!C2W.Equals(FMatrix44f::Identity))
+	if (!Context.AnimInstanceProxy) return;
+	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
+	if (!SkelComp) return;
+	UWorld* World = SkelComp->GetWorld();
+	if (!World) return;
+
+	const FVector Center = NodeXf.TransformPosition(S.Offset * 100.f);
+	const float Radius = S.Radius * 100.f;
+
+	if (Radius <= 0.f)
 	{
-		Inv = C2W.Inverse();
+		DrawDebugSphere(World, Center, 1.f, 8, FColor::Yellow, false, -1.f, 0, 0.25f);
+		return;
 	}
-	return Inv;
+	DrawDebugSphere(World, Center, Radius, 12, FColor::Green, false, -1.f, 0, 0.25f);
 }
 
-FVector FAnimNode_VRMSpringBones::IntegrateVerlet(
-	const FVRMSimJointState& S,
-	const FVector& WorldSpaceBoneAxis,
-	const FMatrix44f& CenterToWorld,
-	float Stiffness, float Drag, const FVector& GravityDirWS, float GravityPower, float DeltaTime)
+void FAnimNode_VRMSpringBones::DrawCollisionCapsule(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap) const
 {
-	// Inertial tail movement in center-space (prev->current) with drag
-	FVector CurrentTailWS = (FVector)CenterToWorld.TransformPosition( (FVector3f)S.CurrentTail );
-	FVector PrevTailWS    = (FVector)CenterToWorld.TransformPosition( (FVector3f)S.PrevTail );
-	const FVector Inertia = (CurrentTailWS - PrevTailWS) * (1.f - Drag);
+	if (!Context.AnimInstanceProxy) return;
+	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
+	if (!SkelComp) return;
+	UWorld* World = SkelComp->GetWorld();
+	if (!World) return;
 
-	// Stiffness and gravity are world-space forces (per spec & TS)
-	const FVector Stiff   = WorldSpaceBoneAxis * (Stiffness * DeltaTime);
-	const FVector External= GravityDirWS * (GravityPower * DeltaTime);
+	const FVector P0 = NodeXf.TransformPosition(Cap.Offset * 100.f);
+	const FVector P1 = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
+	const float Radius = Cap.Radius * 100.f;
 
-	return CurrentTailWS + Inertia + Stiff + External;
+	const float SegmentLen = (P1 - P0).Size();
+	const float CylinderLen = FMath::Max(0.f, SegmentLen - 2.f * Radius);
+	const float HalfHeight = CylinderLen * 0.5f;
+	const FVector Center = (P0 + P1) * 0.5f;
+
+	FVector Dir = (P1 - P0).GetSafeNormal();
+	if (Dir.IsNearlyZero())
+	{
+		DrawDebugSphere(World, Center, Radius, 12, FColor::Green, false, -1.f, 100, 0.25f);
+		return;
+	}
+
+	const FQuat Rotation = FRotationMatrix::MakeFromZ(Dir).ToQuat();
+	DrawDebugCapsule(World, Center, HalfHeight, Radius, Rotation, FColor::Green, false, -1.f, 100, 0.25f);
 }
 
-// ---- collision shapes ----
-// Return signed distance: negative => penetrating (so we need to push along OutPushDir)
-
-float FAnimNode_VRMSpringBones::CollideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir)
+void FAnimNode_VRMSpringBones::DrawCollisionPlane(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderPlane& P) const
 {
-	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset);
-	const FVector Delta = TailWS - CenterWS;
-	const float Distance = Delta.Length() - (Sph.Radius + JointRadius);
-	OutPushDir = Delta.GetSafeNormal();
-	return Distance;
+	if (!Context.AnimInstanceProxy) return;
+	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
+	if (!SkelComp) return;
+	UWorld* World = SkelComp->GetWorld();
+	if (!World) return;
+
+	const FVector Center = NodeXf.TransformPosition(P.Offset * 100.f);
+	FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal();
+	if (NormalWS.IsNearlyZero()) NormalWS = FVector(0, 0, 1);
+
+	const float HalfSize = 25.f * 100.f;
+
+	FVector Tangent = FVector::CrossProduct(NormalWS, FVector(0, 1, 0));
+	if (Tangent.IsNearlyZero()) Tangent = FVector::CrossProduct(NormalWS, FVector(1, 0, 0));
+	Tangent.Normalize();
+	const FVector Bitangent = FVector::CrossProduct(NormalWS, Tangent).GetSafeNormal();
+
+	const FVector C0 = Center + (Tangent * HalfSize) + (Bitangent * HalfSize);
+	const FVector C1 = Center + (Tangent * HalfSize) - (Bitangent * HalfSize);
+	const FVector C2 = Center - (Tangent * HalfSize) - (Bitangent * HalfSize);
+	const FVector C3 = Center - (Tangent * HalfSize) + (Bitangent * HalfSize);
+
+	const FColor PlaneColor = FColor::Blue;
+	const float LifeTime = 0.f;
+	const uint8 DepthPriority = 0;
+	const float Thickness = 2.f;
+	DrawDebugLine(World, C0, C1, PlaneColor, false, LifeTime, DepthPriority, Thickness);
+	DrawDebugLine(World, C1, C2, PlaneColor, false, LifeTime, DepthPriority, Thickness);
+	DrawDebugLine(World, C2, C3, PlaneColor, false, LifeTime, DepthPriority, Thickness);
+	DrawDebugLine(World, C3, C0, PlaneColor, false, LifeTime, DepthPriority, Thickness);
+
+	const float ArrowSize = FMath::Max(50.f, HalfSize * 0.25f);
+	DrawDebugDirectionalArrow(World, Center, Center + NormalWS * ArrowSize, ArrowSize * 0.25f, PlaneColor, false, LifeTime, DepthPriority, 2.f);
 }
 
-float FAnimNode_VRMSpringBones::CollideInsideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir)
+// Draw debug visuals for a single spring joint: head (red), tail (yellow sized by joint radius), optional velocity line and animated-rest target (cyan)
+void FAnimNode_VRMSpringBones::DrawSpringJoint(const FComponentSpacePoseContext& Context, const FTransform& ComponentTM, const FVRMSimJointState& JointState, const FVector& HeadCS, const FVector& TailCS, float JointRadius, const FVector& RestTargetCS, float DeltaTime) const
 {
-	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset);
-	const FVector Delta = TailWS - CenterWS;
-	const float Distance = (Sph.Radius - JointRadius) - Delta.Length(); // negative => outside of inside-sphere
-	OutPushDir = -Delta.GetSafeNormal(); // push toward center
-	return Distance;
-}
+	if (!Context.AnimInstanceProxy) return;
+	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
+	if (!SkelComp) return;
+	UWorld* World = SkelComp->GetWorld();
+	if (!World) return;
 
-float FAnimNode_VRMSpringBones::CollideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir)
-{
-	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset);
-	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset);
-	const FVector AtoB   = TailC - HeadWS;
-	FVector Delta = TailWS - HeadWS;
-	const float Dot = FVector::DotProduct(AtoB, Delta);
-	if (Dot < 0.f) { /* noop */ }
-	else if (Dot > AtoB.SizeSquared()) { Delta -= AtoB; }
-	else { Delta -= AtoB * (Dot / AtoB.SizeSquared()); }
-	const float Distance = Delta.Length() - (Cap.Radius + JointRadius);
-	OutPushDir = Delta.GetSafeNormal();
-	return Distance;
-}
+	const int32 Mode = CVarVRMSB_DrawSprings.GetValueOnAnyThread();
+	if (Mode == 0) return;
 
-float FAnimNode_VRMSpringBones::CollideInsideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir)
-{
-	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset);
-	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset);
-	const FVector AtoB   = TailC - HeadWS;
-	FVector Delta = TailWS - HeadWS;
-	const float Dot = FVector::DotProduct(AtoB, Delta);
-	if (Dot < 0.f) { /* noop */ }
-	else if (Dot > AtoB.SizeSquared()) { Delta -= AtoB; }
-	else { Delta -= AtoB * (Dot / AtoB.SizeSquared()); }
-	const float Distance = (Cap.Radius - JointRadius) - Delta.Length();
-	OutPushDir = -Delta.GetSafeNormal();
-	return Distance;
-}
+	const FVector HeadWS = ComponentTM.TransformPosition(HeadCS);
+	const FVector TailWS = ComponentTM.TransformPosition(TailCS);
 
-float FAnimNode_VRMSpringBones::CollidePlane(const FTransform& NodeXf, const FVRMSpringColliderPlane& P, const FVector& TailWS, float JointRadius, FVector& OutPushDir)
-{
-	const FVector OffsetWS = NodeXf.TransformPosition(P.Offset);
-	const FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal(FVector(0,0,1));
-	const FVector Delta = TailWS - OffsetWS;
-	const float Distance = FVector::DotProduct(Delta, NormalWS) - JointRadius;
-	OutPushDir = NormalWS;
-	return Distance;
+	// Head: red small sphere
+	DrawDebugSphere(World, HeadWS, FMath::Max(1.f, JointRadius * 0.2f), 8, FColor::Red, false, -1.f, 0, 0.25f);
+
+	// Tail: yellow sphere sized to joint radius
+	DrawDebugSphere(World, TailWS, FMath::Max(1.f, JointRadius), 12, FColor::Yellow, false, -1.f, 0, 0.25f);
+
+	// Red line from head to tail
+	DrawDebugLine(World, HeadWS, TailWS, FColor::Red, false, -1.f, 0, 0.5f);
+
+	// Velocity trail when mode >= 2
+	if (Mode >= 2 && DeltaTime > KINDA_SMALL_NUMBER)
+	{
+		// Approximate velocity in world space using CS delta transformed by component TM
+		FVector PrevTailCS = JointState.PrevTail;
+		FVector PrevTailWS = ComponentTM.TransformPosition(PrevTailCS);
+		FVector VelocityWS = (TailWS - PrevTailWS) / DeltaTime; // world units per second
+		const float VelScale = 0.05f; // scale so line isn't excessively long
+		const FVector End = TailWS + VelocityWS * VelScale;
+		// Keep this line around for a short while to create a trail
+		const float LifeTime = 1.f; // seconds
+		DrawDebugLine(World, TailWS, End, FColor::Magenta,	 false, LifeTime, 0, 0.f);
+	}
+
+	// Animated target when mode == 3
+	if (Mode == 3)
+	{
+		const FVector TargetWS = ComponentTM.TransformPosition(RestTargetCS);
+		DrawDebugSphere(World, TargetWS, FMath::Max(1.f, JointRadius * 0.25f), 8, FColor::Cyan, false, -1.f, 0, 0.15f);
+	}
 }
+#endif
+
+/* ---------------------------------------------------------------------------
+ *  Collision resolution
+ * --------------------------------------------------------------------------- */
 
 void FAnimNode_VRMSpringBones::ResolveCollisions(
+	const FComponentSpacePoseContext& Context,
 	FVector& NextTailWS,
 	float JointRadius,
-	const FVRMSpringConfig& Cfg,
-	const FCSPose<FCompactPose>& CSPose,
+	const FVRMSpringConfig& SpringCfg,
+	FCSPose<FCompactPose>& CSPose,
 	const FTransform& ComponentTM,
 	const TArray<int32>& GroupIndices) const
 {
 	for (int32 GIdx : GroupIndices)
 	{
-		if (!Cfg.ColliderGroups.IsValidIndex(GIdx)) { continue; }
-		const FVRMSpringColliderGroup& Group = Cfg.ColliderGroups[GIdx];
+		if (!SpringCfg.ColliderGroups.IsValidIndex(GIdx)) continue;
+		const FVRMSpringColliderGroup& Group = SpringCfg.ColliderGroups[GIdx];
 
 		for (int32 CIdx : Group.ColliderIndices)
 		{
-			if (!Cfg.Colliders.IsValidIndex(CIdx)) { continue; }
-			const FVRMSpringCollider& Col = Cfg.Colliders[CIdx];
+			if (!SpringCfg.Colliders.IsValidIndex(CIdx)) continue;
+			const FVRMSpringCollider& Col = SpringCfg.Colliders[CIdx];
 
-			// Find node transform (component space); fall back to component if unknown
 			FTransform NodeXf = ComponentTM;
 			if (!Col.BoneName.IsNone())
 			{
 				FBoneReference BR; BR.BoneName = Col.BoneName; BR.Initialize(CSPose.GetPose().GetBoneContainer());
 				if (BR.HasValidSetup())
 				{
-					NodeXf = CSPose.GetComponentSpaceTransform(BR.GetCompactPoseIndex(CSPose.GetPose().GetBoneContainer()));
+					NodeXf = CSPose.GetComponentSpaceTransform(BR.GetCompactPoseIndex(CSPose.GetPose().GetBoneContainer())) * ComponentTM;
 				}
 			}
 
 			FVector PushDir; float Pen;
 
-			// spheres
 			for (const auto& S : Col.Spheres)
 			{
-				if (S.bInside) { Pen = CollideInsideSphere(NodeXf, S, NextTailWS, JointRadius, PushDir); }
-				else           { Pen = CollideSphere(NodeXf, S, NextTailWS, JointRadius, PushDir); }
-				if (Pen < 0.f) { NextTailWS -= PushDir * Pen; }
+				Pen = S.bInside
+					? CollideInsideSphere(NodeXf, S, NextTailWS, JointRadius, PushDir)
+					: CollideSphere(NodeXf, S, NextTailWS, JointRadius, PushDir);
+				if (Pen < 0.f) NextTailWS -= PushDir * Pen;
+				VRMSB_DRAW_SPHERE(Context, NodeXf, S);
 			}
-			// capsules
 			for (const auto& Cap : Col.Capsules)
 			{
-				if (Cap.bInside){ Pen = CollideInsideCapsule(NodeXf, Cap, NextTailWS, JointRadius, PushDir); }
-				else            { Pen = CollideCapsule(NodeXf, Cap, NextTailWS, JointRadius, PushDir); }
-				if (Pen < 0.f) { NextTailWS -= PushDir * Pen; }
+				Pen = Cap.bInside
+					? CollideInsideCapsule(NodeXf, Cap, NextTailWS, JointRadius, PushDir)
+					: CollideCapsule(NodeXf, Cap, NextTailWS, JointRadius, PushDir);
+				if (Pen < 0.f) NextTailWS -= PushDir * Pen;
+				VRMSB_DRAW_CAPSULE(Context, NodeXf, Cap);
 			}
-			// planes (extended)
 			for (const auto& Pl : Col.Planes)
 			{
 				Pen = CollidePlane(NodeXf, Pl, NextTailWS, JointRadius, PushDir);
-				if (Pen < 0.f) { NextTailWS -= PushDir * Pen; }
+				if (Pen < 0.f) NextTailWS -= PushDir * Pen;
+				VRMSB_DRAW_PLANE(Context, NodeXf, Pl);
 			}
 		}
 	}
 }
 
-FQuat FAnimNode_VRMSpringBones::ComputeLocalFromTail(
-	const FVRMSimJointState& S,
-	const FVector& NextTailWS,
-	const FMatrix44f& ParentWorldXf,
-	const FMatrix44f& InitialLocalMatrix)
+/* ---------------------------------------------------------------------------
+ *  Collision primitive helpers
+ * --------------------------------------------------------------------------- */
+
+float FAnimNode_VRMSpringBones::CollideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	// to_local = normalize( inv(parentWorld * initialLocal) * nextTailWS )
-	const FMatrix44f WorldToLocal = (ParentWorldXf * InitialLocalMatrix).Inverse();
-	const FVector3f ToLocal = WorldToLocal.TransformVector( FVector3f(NextTailWS) ).GetSafeNormal();
-	const FVector3f FromLocal = FVector3f(S.LocalBoneAxis).GetSafeNormal();
-	const FQuat4f Delta = FQuat4f::FindBetween(FromLocal, ToLocal);
-	return FQuat( (Delta * S.InitialLocalRot) );
+	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset * 100.f);
+	const FVector Delta = TailWS - CenterWS;
+	const float Distance = Delta.Length() - (Sph.Radius * 100.f + JointRadius);
+	OutPushDir = Delta.GetSafeNormal();
+	return Distance;
+}
+
+float FAnimNode_VRMSpringBones::CollideInsideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
+{
+	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset * 100.f);
+	const FVector Delta = TailWS - CenterWS;
+	const float Distance = (Sph.Radius * 100.f - JointRadius) - Delta.Length();
+	OutPushDir = -Delta.GetSafeNormal();
+	return Distance;
+}
+
+float FAnimNode_VRMSpringBones::CollideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
+{
+	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset * 100.f);
+	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
+	const FVector AtoB   = TailC - HeadWS;
+	FVector Delta = TailWS - HeadWS;
+	const float Dot = FVector::DotProduct(AtoB, Delta);
+	if (Dot > 0.f)
+	{
+		const float SegLenSq = AtoB.SizeSquared();
+		if (Dot > SegLenSq) { Delta -= AtoB; }
+		else { Delta -= AtoB * (Dot / SegLenSq); }
+	}
+	const float Distance = Delta.Length() - (Cap.Radius * 100.f + JointRadius);
+	OutPushDir = Delta.GetSafeNormal();
+	return Distance;
+}
+
+float FAnimNode_VRMSpringBones::CollideInsideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
+{
+	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset * 100.f);
+	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
+	const FVector AtoB   = TailC - HeadWS;
+	FVector Delta = TailWS - HeadWS;
+	const float Dot = FVector::DotProduct(AtoB, Delta);
+	if (Dot > 0.f)
+	{
+		const float SegLenSq = AtoB.SizeSquared();
+		if (Dot > SegLenSq) { Delta -= AtoB; }
+		else { Delta -= AtoB * (Dot / SegLenSq); }
+	}
+	const float Distance = (Cap.Radius * 100.f - JointRadius) - Delta.Length();
+	OutPushDir = -Delta.GetSafeNormal();
+	return Distance;
+}
+
+float FAnimNode_VRMSpringBones::CollidePlane(const FTransform& NodeXf, const FVRMSpringColliderPlane& P, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
+{
+	const FVector OffsetWS = NodeXf.TransformPosition(P.Offset * 100.f);
+	FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal();
+	if (NormalWS.IsNearlyZero()) NormalWS = FVector(0,0,1);
+	const FVector Delta = TailWS - OffsetWS;
+	const float Distance = FVector::DotProduct(Delta, NormalWS) - JointRadius;
+	OutPushDir = NormalWS;
+	return Distance;
 }
 
 #undef LOCTEXT_NAMESPACE

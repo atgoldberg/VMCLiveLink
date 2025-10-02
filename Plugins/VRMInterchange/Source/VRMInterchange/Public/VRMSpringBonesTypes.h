@@ -114,3 +114,12 @@ struct VRMINTERCHANGE_API FVRMSpringConfig
         return Spec != EVRMSpringSpec::None && (Springs.Num() > 0 || ColliderGroups.Num() > 0 || Colliders.Num() > 0 || Joints.Num() > 0);
     }
 };
+
+USTRUCT(BlueprintType)
+struct FVRMNodeChildren
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, Category = "VRM|Hierarchy")
+    TArray<int32> Children;
+};

@@ -300,24 +300,29 @@ bool UVRMSpringBonesPostImportPipeline::ParseAndFillDataAssetFromFile(const FStr
 {
     if (!Dest) return false;
     FVRMSpringConfig Config; 
+    TMap<int32, int32> NodeParent;
+    TMap<int32, FVRMNodeChildren> NodeChildren;
     FString Err;
     TMap<int32, FName> NodeMap; // New: capture node index -> bone name mapping
     // Prefer new overload that also returns node map (falls back internally if unavailable)
     bool bParsed = false;
-    if (VRM::ParseSpringBonesFromFile(Filename, Config, NodeMap, Err))
-    {
-        bParsed = true;
-    }
-    else if (VRM::ParseSpringBonesFromFile(Filename, Config, Err)) // fallback to legacy signature for safety
-    {
-        bParsed = true;
-    }
+    bParsed = 
+        VRM::ParseSpringBonesFromFile(Filename, Config, NodeMap, NodeParent, NodeChildren, Err) ||
+        VRM::ParseSpringBonesFromFile(Filename, Config, NodeMap, Err) ||
+        VRM::ParseSpringBonesFromFile(Filename, Config, Err); // fallback to legacy signature for safety
     if (!bParsed)
     {
         return false;
     }
     Dest->SpringConfig = MoveTemp(Config);
     if (NodeMap.Num() > 0) { Dest->SetNodeToBoneMapping(NodeMap); }
+    if (NodeParent.Num() > 0)   { Dest->NodeParent   = MoveTemp(NodeParent); }
+    if (NodeChildren.Num() > 0)   { Dest->NodeChildren  = MoveTemp(NodeChildren); }
+    if (Dest->NodeChildren.Num() > 0)
+    {
+        Dest->BuildResolvedChildren();
+    }
+
     return Dest->SpringConfig.IsValid();
 }
 

@@ -738,4 +738,17 @@ namespace VRM
         }
         return ParseSpringBonesFromJson(Json, OutConfig, OutNodeMap, OutError);
     }
+
+    // Wrapper: richer overload returning parent/children maps. Not all callers need full graph; provide basic support by
+    // delegating to available overload and leaving parent/children empty when not available.
+    bool ParseSpringBonesFromFile(const FString& Filename, FVRMSpringConfig& OutConfig, TMap<int32, FName>& OutNodeMap, TMap<int32, int32>& OutNodeParent, TMap<int32, FVRMNodeChildren>& OutNodeChildren, FString& OutError)
+    {
+        // Clear outputs
+        OutNodeParent.Reset();
+        OutNodeChildren.Reset();
+        // Try the overload that fills node map (best available). If successful, we still don't have parent/children info from simple parser.
+        bool b = ParseSpringBonesFromFile(Filename, OutConfig, OutNodeMap, OutError);
+        // No extra parent/children info available from this parser implementation; leave maps empty.
+        return b;
+    }
 }
