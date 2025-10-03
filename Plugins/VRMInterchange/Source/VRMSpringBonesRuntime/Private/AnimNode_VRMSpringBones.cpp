@@ -11,6 +11,7 @@
 #define VRMSB_DRAW_SPHERE(Context, NodeXf, S) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionSphere(Context, NodeXf, S)
 #define VRMSB_DRAW_CAPSULE(Context, NodeXf, Cap) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionCapsule(Context, NodeXf, Cap)
 #define VRMSB_DRAW_PLANE(Context, NodeXf, P) if (CVarVRMSB_DrawColliders.GetValueOnAnyThread() != 0) DrawCollisionPlane(Context, NodeXf, P)
+
 static TAutoConsoleVariable<int32> CVarVRMSB_DrawColliders(
 	TEXT("vrm.SpringBones.DrawColliders"),
 	0,
@@ -79,6 +80,7 @@ void FAnimNode_VRMSpringBones::Initialize_AnyThread(const FAnimationInitializeCo
 	JointStates.Reset();
 	SpringChainRanges.Reset();
 	PendingBoneWrites.Reset();
+	GetEvaluateGraphExposedInputs().Execute(Context);
 }
 
 void FAnimNode_VRMSpringBones::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
@@ -91,6 +93,7 @@ void FAnimNode_VRMSpringBones::CacheBones_AnyThread(const FAnimationCacheBonesCo
 void FAnimNode_VRMSpringBones::UpdateInternal(const FAnimationUpdateContext& Context)
 {
 	Super::UpdateInternal(Context);
+	GetEvaluateGraphExposedInputs().Execute(Context);
 	CurrentDeltaTime = Context.GetDeltaTime();
 	bEvalCalledThisFrame = false;
 }
@@ -415,29 +418,21 @@ void FAnimNode_VRMSpringBones::EvaluateSkeletalControl_AnyThread(
 void FAnimNode_VRMSpringBones::DrawCollisionSphere(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderSphere& S) const
 {
 	if (!Context.AnimInstanceProxy) return;
-	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
-	if (!SkelComp) return;
-	UWorld* World = SkelComp->GetWorld();
-	if (!World) return;
 
 	const FVector Center = NodeXf.TransformPosition(S.Offset * 100.f);
 	const float Radius = S.Radius * 100.f;
 
 	if (Radius <= 0.f)
 	{
-		DrawDebugSphere(World, Center, 1.f, 8, FColor::Yellow, false, -1.f, 0, 0.25f);
+		Context.AnimInstanceProxy->AnimDrawDebugSphere(Center, 1.f, 8, FColor::Yellow, false, -1.f, 0.25f, SDPG_World);
 		return;
 	}
-	DrawDebugSphere(World, Center, Radius, 12, FColor::Green, false, -1.f, 0, 0.25f);
+	Context.AnimInstanceProxy->AnimDrawDebugSphere(Center, Radius, 12, FColor::Green, false, -1.f, 0.25f, SDPG_World);
 }
 
 void FAnimNode_VRMSpringBones::DrawCollisionCapsule(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap) const
 {
 	if (!Context.AnimInstanceProxy) return;
-	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
-	if (!SkelComp) return;
-	UWorld* World = SkelComp->GetWorld();
-	if (!World) return;
 
 	const FVector P0 = NodeXf.TransformPosition(Cap.Offset * 100.f);
 	const FVector P1 = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
@@ -451,21 +446,17 @@ void FAnimNode_VRMSpringBones::DrawCollisionCapsule(const FComponentSpacePoseCon
 	FVector Dir = (P1 - P0).GetSafeNormal();
 	if (Dir.IsNearlyZero())
 	{
-		DrawDebugSphere(World, Center, Radius, 12, FColor::Green, false, -1.f, 100, 0.25f);
+		Context.AnimInstanceProxy->AnimDrawDebugSphere(Center, Radius, 12, FColor::Green, false, -1.f, 0.25f, SDPG_World);
 		return;
 	}
 
-	const FQuat Rotation = FRotationMatrix::MakeFromZ(Dir).ToQuat();
-	DrawDebugCapsule(World, Center, HalfHeight, Radius, Rotation, FColor::Green, false, -1.f, 100, 0.25f);
+	const FRotator Rotation = FRotator(FRotationMatrix::MakeFromZ(Dir).ToQuat());
+	Context.AnimInstanceProxy->AnimDrawDebugCapsule(Center, HalfHeight, Radius, Rotation, FColor::Green, false, -1.f, 0.25f, SDPG_World);
 }
 
 void FAnimNode_VRMSpringBones::DrawCollisionPlane(const FComponentSpacePoseContext& Context, const FTransform& NodeXf, const FVRMSpringColliderPlane& P) const
 {
 	if (!Context.AnimInstanceProxy) return;
-	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
-	if (!SkelComp) return;
-	UWorld* World = SkelComp->GetWorld();
-	if (!World) return;
 
 	const FVector Center = NodeXf.TransformPosition(P.Offset * 100.f);
 	FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal();
@@ -487,38 +478,33 @@ void FAnimNode_VRMSpringBones::DrawCollisionPlane(const FComponentSpacePoseConte
 	const float LifeTime = 0.f;
 	const uint8 DepthPriority = 0;
 	const float Thickness = 2.f;
-	DrawDebugLine(World, C0, C1, PlaneColor, false, LifeTime, DepthPriority, Thickness);
-	DrawDebugLine(World, C1, C2, PlaneColor, false, LifeTime, DepthPriority, Thickness);
-	DrawDebugLine(World, C2, C3, PlaneColor, false, LifeTime, DepthPriority, Thickness);
-	DrawDebugLine(World, C3, C0, PlaneColor, false, LifeTime, DepthPriority, Thickness);
+	Context.AnimInstanceProxy->AnimDrawDebugLine(C0, C1, PlaneColor, false, LifeTime, Thickness, SDPG_World);
+	Context.AnimInstanceProxy->AnimDrawDebugLine(C1, C2, PlaneColor, false, LifeTime, Thickness, SDPG_World);
+	Context.AnimInstanceProxy->AnimDrawDebugLine(C2, C3, PlaneColor, false, LifeTime, Thickness, SDPG_World);
+	Context.AnimInstanceProxy->AnimDrawDebugLine(C3, C0, PlaneColor, false, LifeTime, Thickness, SDPG_World);
 
 	const float ArrowSize = FMath::Max(50.f, HalfSize * 0.25f);
-	DrawDebugDirectionalArrow(World, Center, Center + NormalWS * ArrowSize, ArrowSize * 0.25f, PlaneColor, false, LifeTime, DepthPriority, 2.f);
+	Context.AnimInstanceProxy->AnimDrawDebugDirectionalArrow(Center, Center + NormalWS * ArrowSize, ArrowSize * 0.25f, PlaneColor, false, LifeTime, 2.f, SDPG_World);
 }
 
 // Draw debug visuals for a single spring joint: head (red), tail (yellow sized by joint radius), optional velocity line and animated-rest target (cyan)
 void FAnimNode_VRMSpringBones::DrawSpringJoint(const FComponentSpacePoseContext& Context, const FTransform& ComponentTM, const FVRMSimJointState& JointState, const FVector& HeadCS, const FVector& TailCS, float JointRadius, const FVector& RestTargetCS, float DeltaTime) const
 {
 	if (!Context.AnimInstanceProxy) return;
-	USkinnedMeshComponent* SkelComp = Context.AnimInstanceProxy->GetSkelMeshComponent();
-	if (!SkelComp) return;
-	UWorld* World = SkelComp->GetWorld();
-	if (!World) return;
 
 	const int32 Mode = CVarVRMSB_DrawSprings.GetValueOnAnyThread();
 	if (Mode == 0) return;
 
 	const FVector HeadWS = ComponentTM.TransformPosition(HeadCS);
 	const FVector TailWS = ComponentTM.TransformPosition(TailCS);
-
+	Context.AnimInstanceProxy->AnimDrawDebugSphere(HeadWS, FMath::Max(1.f, JointRadius * 0.2f), 8, FColor::Red, false, -1.f, 0.25f, SDPG_World);
 	// Head: red small sphere
-	DrawDebugSphere(World, HeadWS, FMath::Max(1.f, JointRadius * 0.2f), 8, FColor::Red, false, -1.f, 0, 0.25f);
 
 	// Tail: yellow sphere sized to joint radius
-	DrawDebugSphere(World, TailWS, FMath::Max(1.f, JointRadius), 12, FColor::Yellow, false, -1.f, 0, 0.25f);
+	Context.AnimInstanceProxy->AnimDrawDebugSphere(TailWS, FMath::Max(1.f, JointRadius), 12, FColor::Yellow, false, -1.f, 0.25f, SDPG_World);
 
 	// Red line from head to tail
-	DrawDebugLine(World, HeadWS, TailWS, FColor::Red, false, -1.f, 0, 0.5f);
+	Context.AnimInstanceProxy->AnimDrawDebugLine(HeadWS, TailWS, FColor::Red, false, -1.f, 0.5f, SDPG_World);
 
 	// Velocity trail when mode >= 2
 	if (Mode >= 2 && DeltaTime > KINDA_SMALL_NUMBER)
@@ -531,14 +517,14 @@ void FAnimNode_VRMSpringBones::DrawSpringJoint(const FComponentSpacePoseContext&
 		const FVector End = TailWS + VelocityWS * VelScale;
 		// Keep this line around for a short while to create a trail
 		const float LifeTime = 1.f; // seconds
-		DrawDebugLine(World, TailWS, End, FColor::Magenta,	 false, LifeTime, 0, 0.f);
+		Context.AnimInstanceProxy->AnimDrawDebugLine(TailWS, End, FColor::Magenta, false, LifeTime, 0.f, SDPG_World);
 	}
 
 	// Animated target when mode == 3
 	if (Mode == 3)
 	{
 		const FVector TargetWS = ComponentTM.TransformPosition(RestTargetCS);
-		DrawDebugSphere(World, TargetWS, FMath::Max(1.f, JointRadius * 0.25f), 8, FColor::Cyan, false, -1.f, 0, 0.15f);
+		Context.AnimInstanceProxy->AnimDrawDebugSphere(TargetWS, FMath::Max(1.f, JointRadius * 0.25f), 8, FColor::Cyan, false, -1.f, 0.15f, SDPG_World);
 	}
 }
 #endif
