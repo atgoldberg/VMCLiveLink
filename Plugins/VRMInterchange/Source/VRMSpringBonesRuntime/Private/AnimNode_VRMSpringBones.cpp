@@ -288,6 +288,7 @@ void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseCont
 		const bool  bHasColliders  = Spring.ColliderGroupIndices.Num() > 0;
 		const FVector GravityDir   = Spring.GravityDir;
 		const float DefaultHitRadius = FMath::Max(0.f, Spring.HitRadius * 100.0f);
+		const FVector ExternalVel	= ExternalVelocity * ExternalVelocityScale * DeltaTime;
 
 		for (int32 ChainPos = 0; ChainPos < SpringChainRng.Num; ++ChainPos)
 		{
@@ -321,7 +322,7 @@ void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseCont
 			const FQuat AnimatedBoneRotCS = JointBoneCS.GetRotation();
 			const FVector RestTargetCS = CurrentHeadPosCS + AnimatedBoneRotCS.RotateVector(JointState.InitialLocalChildPos);
 
-			FVector SimTailPos = JointState.CurrentTail + Inertia + Gravity;
+			FVector SimTailPos = JointState.CurrentTail + Inertia + Gravity + ExternalVel;
 			if (!RestTargetCS.ContainsNaN())
 			{
 				const float StiffScale = Stiffness * DeltaTime;
