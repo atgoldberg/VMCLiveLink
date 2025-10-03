@@ -65,6 +65,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Spring", meta=(PinShownByDefault))
 	TObjectPtr<UVRMSpringBoneData> SpringData = nullptr;
 
+	/** Spring configuration asset (contains joints, springs, colliders) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spring", meta = (PinShownByDefault))
+	FVector ExternalVelocity = FVector(0.f, 0.f, 0.f);
+
+	/** Spring configuration asset (contains joints, springs, colliders) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spring", meta = (PinShownByDefault))
+	float ExternalVelocityScale = 1.f;
+
+
 	// FAnimNode_Base / SkeletalControl overrides
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;
