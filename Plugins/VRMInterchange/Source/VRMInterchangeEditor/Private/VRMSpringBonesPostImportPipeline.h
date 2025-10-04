@@ -2,11 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "InterchangePipelineBase.h"
+#include "VRMSpringBoneData.h" // Ensure UVRMSpringBoneData is a complete type here
 #include "VRMSpringBonesPostImportPipeline.generated.h"
 
 class UInterchangeBaseNodeContainer;
 class UInterchangeSourceData;
-class UVRMSpringBoneData;
 class USkeleton;
 class USkeletalMesh;
 class UFactory;
