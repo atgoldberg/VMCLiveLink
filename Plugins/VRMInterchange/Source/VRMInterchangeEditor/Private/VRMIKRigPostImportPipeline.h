@@ -27,6 +27,10 @@ public:
 	UVRMIKRigPostImportPipeline() = default;
 
 #if WITH_EDITOR
+	/** The name of the pipeline that will be display in the import dialog. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Common", meta = (StandAlonePipelineProperty = "True", PipelineInternalEditionData = "True"))
+	FString PipelineDisplayName = "VRM IK Rig Set-up";
+
 	/** Generate IK Rig asset next to the imported mesh */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
 	bool bGenerateIKRig = true;
