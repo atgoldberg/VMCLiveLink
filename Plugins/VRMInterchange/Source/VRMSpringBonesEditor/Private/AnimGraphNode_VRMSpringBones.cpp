@@ -1,6 +1,8 @@
 #include "AnimGraphNode_VRMSpringBones.h"
 #include "Animation/AnimBlueprint.h"
-#include "VRMInterchangeLog.h"
+
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "ToolMenus.h"
 
 #define LOCTEXT_NAMESPACE "AnimGraphNode_VRMSpringBones"
 

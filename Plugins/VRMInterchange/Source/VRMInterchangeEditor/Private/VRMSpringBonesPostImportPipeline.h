@@ -52,7 +52,7 @@ public:
 	bool bReusePostProcessABPOnReimport = true;
 
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
-	FString AnimationSubFolder = TEXT("Animation");
+	FString AnimationSubFolder = TEXT("SpringBones");
 
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
 	FString SubFolder = TEXT("SpringBones");

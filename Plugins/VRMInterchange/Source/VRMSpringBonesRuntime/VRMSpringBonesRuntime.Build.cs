@@ -12,8 +12,7 @@ public class VRMSpringBonesRuntime : ModuleRules
             "CoreUObject",
             "Engine",
             "AnimGraphRuntime",
-            "AnimationCore",
-            "VRMInterchange" // need access to UVRMSpringBoneData & types
+            "AnimationCore"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]

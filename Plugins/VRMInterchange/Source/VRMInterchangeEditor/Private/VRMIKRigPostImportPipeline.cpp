@@ -56,7 +56,7 @@ void UVRMIKRigPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer*
 	DeferredAltSkeletonSearchRoot = GetParentPackagePath(CharacterBasePath);
 
 	const FString CharacterName = FPaths::GetBaseFilename(Filename);
-	DeferredAnimFolder = CharacterBasePath / AnimationSubFolder;
+	DeferredAnimFolder = CharacterBasePath / IKRigDefinitionSubFolder;
 	DeferredDesiredIKName = FString::Printf(TEXT("%s_%s"), *AssetBaseName, *CharacterName);
 	bDeferredOverwriteIK = bOverwriteExisting;
 
@@ -188,6 +188,10 @@ void UVRMIKRigPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject
 		return;
 	}
 
+	// Use the SkeletalMesh asset name (fallback to last package path segment) for character substitution
+	const FString CharName = ResolveEffectiveCharacterName(SkelMesh, DeferredPackagePath);
+	DeferredDesiredIKName = FString::Printf(TEXT("%s_%s"), *AssetBaseName, *CharName);
+
 	// Create IK Rig now (no save)
 	UIKRigDefinition* NewIKRig = nullptr;
 	if (DuplicateTemplateIKRig(DeferredAnimFolder, DeferredDesiredIKName, NewIKRig, bDeferredOverwriteIK))
@@ -201,6 +205,22 @@ void UVRMIKRigPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject
 
 	bDeferredCompleted = true;
 	UnregisterPostImportCommit();
+}
+
+FString UVRMIKRigPostImportPipeline::ResolveEffectiveCharacterName(USkeletalMesh* SkelMesh, const FString& PackagePath) const
+{
+	if (SkelMesh)
+	{
+		return SkelMesh->GetName();
+	}
+
+	// Fallback: last segment of the package path (e.g., /Game/MyChar -> MyChar)
+	int32 SlashIdx = INDEX_NONE;
+	if (PackagePath.FindLastChar(TEXT('/'), SlashIdx) && SlashIdx != INDEX_NONE && SlashIdx + 1 < PackagePath.Len())
+	{
+		return PackagePath.Mid(SlashIdx + 1);
+	}
+	return PackagePath.IsEmpty() ? TEXT("Character") : PackagePath;
 }
 
 #endif

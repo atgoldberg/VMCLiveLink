@@ -2,8 +2,18 @@
 
 #include "CoreMinimal.h"
 #include "InterchangeTranslatorBase.h"
-#include "Mesh/InterchangeMeshPayloadInterface.h"
-#include "Texture/InterchangeTexturePayloadInterface.h"
+
+#if __has_include("Mesh/InterchangeMeshPayloadInterface.h")
+  #include "Mesh/InterchangeMeshPayloadInterface.h"
+#else
+  #include "InterchangeMeshPayloadInterface.h"
+#endif
+
+#if __has_include("Texture/InterchangeTexturePayloadInterface.h")
+  #include "Texture/InterchangeTexturePayloadInterface.h"
+#else
+  #include "InterchangeTexturePayloadInterface.h"
+#endif
 
 // Forward declares to avoid including heavy headers here
 namespace UE::Interchange

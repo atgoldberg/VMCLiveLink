@@ -59,8 +59,8 @@ void UVRMLiveLinkPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContain
 	// Cache desired asset names and locations for post-import creation
 	DeferredActorBPPath = LiveLinkFolder;
 	DeferredAnimBPPath = AnimFolder;
-	DeferredActorBPName = FString::Printf(TEXT("BP_VRM_%s"), *CharacterName);
-	DeferredAnimBPName  = FString::Printf(TEXT("ABP_VRM_%s"), *CharacterName);
+	DeferredActorBPName = FString::Printf(TEXT("BP_LL_VRM_%s"), *CharacterName);
+	DeferredAnimBPName  = FString::Printf(TEXT("ABP_LL_VRM_%s"), *CharacterName);
 	bDeferredOverwrite = bOverwriteExisting;
 
 	// Do NOT duplicate here; defer until after import is confirmed and skeletal assets exist
@@ -177,4 +177,19 @@ void UVRMLiveLinkPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObj
 	UnregisterPostImportCommit();
 }
 
+FString UVRMLiveLinkPostImportPipeline::ResolveEffectiveCharacterName(USkeletalMesh* SkelMesh, const FString& PackagePath) const
+{
+	if (SkelMesh)
+	{
+		return SkelMesh->GetName();
+	}
+
+	// Fallback: last segment of the package path (e.g., /Game/MyChar -> MyChar)
+	int32 SlashIdx = INDEX_NONE;
+	if (PackagePath.FindLastChar(TEXT('/'), SlashIdx) && SlashIdx != INDEX_NONE && SlashIdx + 1 < PackagePath.Len())
+	{
+		return PackagePath.Mid(SlashIdx + 1);
+	}
+	return PackagePath.IsEmpty() ? TEXT("Character") : PackagePath;
+}
 #endif
