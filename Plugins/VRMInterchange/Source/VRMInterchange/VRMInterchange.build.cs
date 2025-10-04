@@ -17,6 +17,7 @@ public class VRMInterchange : ModuleRules
             // Expose Interchange types in public headers
             "InterchangeCore",
             "InterchangeImport",
+            "VRMSpringBonesRuntime"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]

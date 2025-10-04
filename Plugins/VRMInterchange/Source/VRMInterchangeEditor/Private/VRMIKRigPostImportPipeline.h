@@ -41,7 +41,7 @@ public:
 
 	/** Subfolder under character folder to place the asset */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
-	FString AnimationSubFolder = TEXT("Animation");
+	FString IKRigDefinitionSubFolder = TEXT("IKRigDefinition");
 
 	/** Base name prefix for the IK Rig (actual name includes the character suffix) */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
@@ -61,6 +61,9 @@ private:
 	FString GetParentPackagePath(const FString& InPath) const;
 	bool DuplicateTemplateIKRig(const FString& TargetPackagePath, const FString& BaseName, UIKRigDefinition*& OutIKRig, bool bOverwrite) const;
 	FString MakeCharacterBasePath(const FString& SourceFilename, const FString& ContentBasePath) const;
+
+	// Compute a robust character name using the imported mesh name if available, else the last segment of the package path
+	FString ResolveEffectiveCharacterName(USkeletalMesh* SkelMesh, const FString& PackagePath) const;
 
 	// Post-import deferral
 	void RegisterPostImportCommit();

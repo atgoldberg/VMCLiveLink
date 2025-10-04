@@ -80,6 +80,9 @@ private:
 	void UnregisterPostImportCommit();
 	void OnAssetPostImport(class UFactory* InFactory, UObject* InCreatedObject);
 
+	// Compute a robust character name using the imported mesh name if available, else the last segment of the package path
+	FString ResolveEffectiveCharacterName(USkeletalMesh* SkelMesh, const FString& PackagePath) const;
+
 	// Deferred state for post-import commit
 	FDelegateHandle ImportPostHandle;
 	FString DeferredSkeletonSearchRoot;

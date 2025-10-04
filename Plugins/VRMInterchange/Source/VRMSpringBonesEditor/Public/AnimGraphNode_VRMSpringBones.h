@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "Animation/AnimBlueprint.h"
 #include "AnimGraphNode_SkeletalControlBase.h"
-#include "VRMInterchangeLog.h"
 #include "AnimNode_VRMSpringBones.h"
 #include "AnimGraphNode_VRMSpringBones.generated.h"
 

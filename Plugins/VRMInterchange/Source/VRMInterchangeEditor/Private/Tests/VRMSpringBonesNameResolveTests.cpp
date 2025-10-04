@@ -1,5 +1,19 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
+#if !__has_include("cgltf.h")
+// cgltf is not available in this environment; compile a stub test.
+#include "Misc/AutomationTest.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVRMSpringBonesNameResolveTests_Skipped, "VRM.SpringBones.NameResolve.SkippedNoCgltf", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FVRMSpringBonesNameResolveTests_Skipped::RunTest(const FString& Parameters)
+{
+    // Skipped due to missing cgltf.h
+    return true;
+}
+
+#else
+
 #include "Misc/AutomationTest.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
@@ -89,5 +103,7 @@ bool FVRMResolveNamesFromGltf::RunTest(const FString& Parameters)
 
     return true;
 }
+
+#endif // !__has_include("cgltf.h")
 
 #endif // WITH_DEV_AUTOMATION_TESTS
