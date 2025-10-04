@@ -8,31 +8,31 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "UObject/Package.h"
-#include "UObject/SavePackage.h"
 #include "Modules/ModuleManager.h"
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rig/IKRigDefinition.h"
-#include "VRMInterchangeSettings.h" // new settings include
+#include "VRMInterchangeSettings.h"
 
+#if WITH_EDITOR
+#include "UnrealEdGlobals.h"
+#include "Subsystems/ImportSubsystem.h"
+#endif
+
+// Stage names/paths and defer creation to post-import (after dialog confirmation)
 void UVRMIKRigPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
-	// Global project setting gate
+	// Respect project-level toggle
 	if (const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>())
 	{
 		if (!Settings->bGenerateIKRigAssets)
 		{
-			return; // disabled at project level
+			return;
 		}
 	}
-	// Per-pipeline instance toggle
-	if (!bGenerateIKRig)
-	{
-		return;
-	}
-
-	if (!BaseNodeContainer)
+	// Per-instance
+	if (!bGenerateIKRig || !BaseNodeContainer)
 	{
 		return;
 	}
@@ -49,56 +49,29 @@ void UVRMIKRigPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer*
 
 	const FString Filename = Source->GetFilename();
 
-	// Character base path: /Game/<CharacterName>
+	// Character base path and desired names
 	const FString CharacterBasePath = MakeCharacterBasePath(Filename, ContentBasePath);
 	DeferredPackagePath = CharacterBasePath;
-	const FString AnimFolder = CharacterBasePath / AnimationSubFolder;
+	DeferredSkeletonSearchRoot = CharacterBasePath;
+	DeferredAltSkeletonSearchRoot = GetParentPackagePath(CharacterBasePath);
+
 	const FString CharacterName = FPaths::GetBaseFilename(Filename);
-	const FString DesiredIKName = FString::Printf(TEXT("IK_Rig_VRM_%s"), *CharacterName);
+	DeferredAnimFolder = CharacterBasePath / AnimationSubFolder;
+	DeferredDesiredIKName = FString::Printf(TEXT("%s_%s"), *AssetBaseName, *CharacterName);
+	bDeferredOverwriteIK = bOverwriteExisting;
 
-	USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr;
-	const bool bFoundHere = FindImportedSkeletalAssets(CharacterBasePath, SkelMesh, Skeleton) && (SkelMesh || Skeleton);
-	const bool bFoundParent = !bFoundHere && FindImportedSkeletalAssets(GetParentPackagePath(CharacterBasePath), SkelMesh, Skeleton) && (SkelMesh || Skeleton);
-	if (!bFoundHere && !bFoundParent)
-	{
-		// No skeletal assets yet - register for deferral
-		RegisterDeferredIKRig(CharacterBasePath, CharacterBasePath);
-		DeferredAltSkeletonSearchRoot = GetParentPackagePath(CharacterBasePath);
-		return;
-	}
-
-	UIKRigDefinition* NewIKRig = nullptr;
-	if (!DuplicateTemplateIKRig(AnimFolder, DesiredIKName, NewIKRig, bOverwriteExisting))
-	{
-		return;
-	}
-
-	if (NewIKRig)
-	{
-		USkeletalMesh* TargetMesh = SkelMesh;
-		if (!TargetMesh && Skeleton)
-		{
-			// best effort: find any mesh using this skeleton under character
-			FAssetRegistryModule& ARM = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-			FARFilter MeshFilter; MeshFilter.bRecursivePaths=true; MeshFilter.PackagePaths.Add(*CharacterBasePath); MeshFilter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
-			TArray<FAssetData> Meshes; ARM.Get().GetAssets(MeshFilter, Meshes);
-			if (Meshes.Num()>0) { TargetMesh = Cast<USkeletalMesh>(Meshes[0].GetAsset()); }
-		}
-
-		if (TargetMesh)
-		{
-			NewIKRig->SetPreviewMesh(TargetMesh, true);
-			NewIKRig->MarkPackageDirty();
-			if (UPackage* Pkg = NewIKRig->GetOutermost())
-			{
-				const FString FN = FPackageName::LongPackageNameToFilename(Pkg->GetName(), FPackageName::GetAssetPackageExtension());
-				FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags = RF_Public | RF_Standalone; SaveArgs.SaveFlags = SAVE_NoError;
-				UPackage::SavePackage(Pkg, nullptr, *FN, SaveArgs);
-			}
-		}
-	}
+	// Defer actual creation until the import is confirmed and skeletal assets exist
+	RegisterPostImportCommit();
 #endif
 }
+
+#if WITH_EDITOR
+void UVRMIKRigPostImportPipeline::BeginDestroy()
+{
+	UnregisterPostImportCommit();
+	Super::BeginDestroy();
+}
+#endif
 
 #if WITH_EDITOR
 
@@ -126,7 +99,6 @@ FString UVRMIKRigPostImportPipeline::MakeCharacterBasePath(const FString& Source
 bool UVRMIKRigPostImportPipeline::DuplicateTemplateIKRig(const FString& TargetPackagePath, const FString& BaseName, UIKRigDefinition*& OutIKRig, bool bOverwrite) const
 {
 	OutIKRig = nullptr;
-	// Load template in plugin
 	const TCHAR* TemplatePath = TEXT("/VRMInterchange/Animation/IK_Rig_VRMTemplate.IK_Rig_VRMTemplate");
 	UIKRigDefinition* TemplateRig = Cast<UIKRigDefinition>(StaticLoadObject(UIKRigDefinition::StaticClass(), nullptr, TemplatePath));
 	if (!TemplateRig)
@@ -159,72 +131,76 @@ bool UVRMIKRigPostImportPipeline::DuplicateTemplateIKRig(const FString& TargetPa
 	return OutIKRig != nullptr;
 }
 
-void UVRMIKRigPostImportPipeline::RegisterDeferredIKRig(const FString& InSkeletonSearchRoot, const FString& InPackagePath)
+void UVRMIKRigPostImportPipeline::RegisterPostImportCommit()
 {
-	UnregisterDeferredIKRig();
-	DeferredSkeletonSearchRoot = InSkeletonSearchRoot;
-	DeferredAltSkeletonSearchRoot = GetParentPackagePath(InSkeletonSearchRoot);
-	DeferredPackagePath = InPackagePath;
-	bDeferredCompleted = false;
-	FAssetRegistryModule& ARM=FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-	DeferredHandle = ARM.Get().OnAssetAdded().AddUObject(this, &UVRMIKRigPostImportPipeline::OnAssetAddedForDeferredIKRig);
-}
-
-void UVRMIKRigPostImportPipeline::UnregisterDeferredIKRig()
-{
-	if (DeferredHandle.IsValid())
+	if (ImportPostHandle.IsValid())
 	{
-		if (FModuleManager::Get().IsModuleLoaded("AssetRegistry"))
-		{
-			FAssetRegistryModule& ARM = FModuleManager::GetModuleChecked<FAssetRegistryModule>("AssetRegistry");
-			ARM.Get().OnAssetAdded().Remove(DeferredHandle);
-		}
-		DeferredHandle.Reset();
+		return;
+	}
+	if (UImportSubsystem* ImportSubsystem = GEditor ? GEditor->GetEditorSubsystem<UImportSubsystem>() : nullptr)
+	{
+		ImportPostHandle = ImportSubsystem->OnAssetPostImport.AddUObject(this, &UVRMIKRigPostImportPipeline::OnAssetPostImport);
 	}
 }
 
-void UVRMIKRigPostImportPipeline::OnAssetAddedForDeferredIKRig(const FAssetData& AssetData)
+void UVRMIKRigPostImportPipeline::UnregisterPostImportCommit()
 {
-	if (bDeferredCompleted || !AssetData.IsValid()) return;
-	const FName ClassName = AssetData.AssetClassPath.GetAssetName();
-	const bool bIsSkeletalMesh = (ClassName == USkeletalMesh::StaticClass()->GetFName());
-	const bool bIsSkeleton = (ClassName == USkeleton::StaticClass()->GetFName());
-	if (!bIsSkeletalMesh && !bIsSkeleton) return;
-
-	const FString PkgPath = AssetData.PackagePath.ToString();
-	if (!PkgPath.StartsWith(DeferredSkeletonSearchRoot) && !PkgPath.StartsWith(DeferredAltSkeletonSearchRoot)) return;
-
-	USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr;
-	bool bFound = FindImportedSkeletalAssets(DeferredSkeletonSearchRoot, SkelMesh, Skeleton) && (SkelMesh || Skeleton);
-	if (!bFound) bFound = FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot, SkelMesh, Skeleton) && (SkelMesh || Skeleton);
-	if (!bFound) return;
-
-	const FString CharacterName = FPaths::GetCleanFilename(DeferredPackagePath);
-	const FString DesiredIKName = FString::Printf(TEXT("IK_Rig_VRM_%s"), *CharacterName);
-
-	const FString AnimFolder = DeferredPackagePath / AnimationSubFolder;
-	UIKRigDefinition* NewIKRig = nullptr;
-	if (!DuplicateTemplateIKRig(AnimFolder, DesiredIKName, NewIKRig, bOverwriteExisting))
+	if (ImportPostHandle.IsValid())
 	{
-		UnregisterDeferredIKRig();
-		bDeferredCompleted = true;
+		if (UImportSubsystem* ImportSubsystem = GEditor ? GEditor->GetEditorSubsystem<UImportSubsystem>() : nullptr)
+		{
+			ImportSubsystem->OnAssetPostImport.Remove(ImportPostHandle);
+		}
+		ImportPostHandle.Reset();
+	}
+}
+
+void UVRMIKRigPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject* InCreatedObject)
+{
+	if (bDeferredCompleted || !InCreatedObject)
+	{
 		return;
 	}
 
-	if (NewIKRig && SkelMesh)
+	const bool bIsSkelMesh = InCreatedObject->IsA<USkeletalMesh>();
+	const bool bIsSkeleton = InCreatedObject->IsA<USkeleton>();
+	if (!bIsSkelMesh && !bIsSkeleton)
 	{
-		NewIKRig->SetPreviewMesh(SkelMesh, true);
-		NewIKRig->MarkPackageDirty();
-		if (UPackage* Pkg = NewIKRig->GetOutermost())
+		return;
+	}
+
+	const FString PkgPath = InCreatedObject->GetOutermost()->GetPathName();
+	if (!PkgPath.StartsWith(DeferredSkeletonSearchRoot) && !PkgPath.StartsWith(DeferredAltSkeletonSearchRoot))
+	{
+		return;
+	}
+
+	// Resolve skeletal assets now
+	USkeletalMesh* SkelMesh = nullptr;
+	USkeleton* Skeleton = nullptr;
+	bool bFound = FindImportedSkeletalAssets(DeferredSkeletonSearchRoot, SkelMesh, Skeleton) && (SkelMesh || Skeleton);
+	if (!bFound)
+	{
+		bFound = FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot, SkelMesh, Skeleton) && (SkelMesh || Skeleton);
+	}
+	if (!bFound)
+	{
+		return;
+	}
+
+	// Create IK Rig now (no save)
+	UIKRigDefinition* NewIKRig = nullptr;
+	if (DuplicateTemplateIKRig(DeferredAnimFolder, DeferredDesiredIKName, NewIKRig, bDeferredOverwriteIK))
+	{
+		if (NewIKRig && SkelMesh)
 		{
-			const FString FN = FPackageName::LongPackageNameToFilename(Pkg->GetName(), FPackageName::GetAssetPackageExtension());
-			FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags = RF_Public | RF_Standalone; SaveArgs.SaveFlags = SAVE_NoError;
-			UPackage::SavePackage(Pkg, nullptr, *FN, SaveArgs);
+			NewIKRig->SetPreviewMesh(SkelMesh, true);
+			NewIKRig->MarkPackageDirty();
 		}
 	}
 
-	UnregisterDeferredIKRig();
 	bDeferredCompleted = true;
+	UnregisterPostImportCommit();
 }
 
 #endif

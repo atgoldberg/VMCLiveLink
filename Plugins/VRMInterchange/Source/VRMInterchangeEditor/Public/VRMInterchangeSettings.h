@@ -4,6 +4,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "VRMInterchangeSettings.generated.h"
 
+
 UCLASS(config=Game, defaultconfig, meta=(DisplayName="VRM Interchange"))
 class VRMINTERCHANGEEDITOR_API UVRMInterchangeSettings : public UDeveloperSettings
 {

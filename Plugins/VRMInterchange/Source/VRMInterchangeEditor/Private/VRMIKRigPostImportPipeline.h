@@ -9,7 +9,16 @@ class UInterchangeSourceData;
 class USkeletalMesh;
 class USkeleton;
 class UIKRigDefinition;
+class UFactory;
 
+/**
+ * VRM IK Rig (Post-Import)
+ *
+ * - Runs after the user confirms the Interchange import dialog.
+ * - Duplicates an IK Rig asset from a template, targets the imported Skeleton/SkeletalMesh.
+ * - Sets the preview mesh on the IK Rig when possible.
+ * - Does NOT save packages during import; marks packages dirty so Save All/SCC handle persistence.
+ */
 UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced, ClassGroup=(Interchange), meta=(DisplayName="VRM IK Rig (Post-Import)"))
 class VRMINTERCHANGEEDITOR_API UVRMIKRigPostImportPipeline : public UInterchangePipelineBase
 {
@@ -18,25 +27,29 @@ public:
 	UVRMIKRigPostImportPipeline() = default;
 
 #if WITH_EDITOR
-	// Whether to generate an IK Rig asset next to the imported mesh
+	/** Generate IK Rig asset next to the imported mesh */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
 	bool bGenerateIKRig = true;
 
-	// Overwrite existing asset with same name
+	/** If true, overwrite existing asset with same name; otherwise create a unique name */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
 	bool bOverwriteExisting = false;
 
-	// Subfolder under character folder to place the asset
+	/** Subfolder under character folder to place the asset */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
 	FString AnimationSubFolder = TEXT("Animation");
 
-	// Base name of the generated asset
+	/** Base name prefix for the IK Rig (actual name includes the character suffix) */
 	UPROPERTY(EditAnywhere, Category = "VRM IK Rig")
 	FString AssetBaseName = TEXT("IK_Rig_VRM");
 #endif
 
 	// UInterchangePipelineBase
 	virtual void ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath) override;
+
+#if WITH_EDITOR
+	virtual void BeginDestroy() override;
+#endif
 
 private:
 #if WITH_EDITOR
@@ -45,16 +58,21 @@ private:
 	bool DuplicateTemplateIKRig(const FString& TargetPackagePath, const FString& BaseName, UIKRigDefinition*& OutIKRig, bool bOverwrite) const;
 	FString MakeCharacterBasePath(const FString& SourceFilename, const FString& ContentBasePath) const;
 
-	// Deferred creation if skeletal assets are not available yet
-	void RegisterDeferredIKRig(const FString& InSkeletonSearchRoot, const FString& InPackagePath);
-	void UnregisterDeferredIKRig();
-	void OnAssetAddedForDeferredIKRig(const struct FAssetData& AssetData);
+	// Post-import deferral
+	void RegisterPostImportCommit();
+	void UnregisterPostImportCommit();
+	void OnAssetPostImport(class UFactory* InFactory, UObject* InCreatedObject);
 
-	// Deferred state
-	FDelegateHandle DeferredHandle;
+	// Deferred state for post-import commit
+	FDelegateHandle ImportPostHandle;
 	FString DeferredSkeletonSearchRoot;
 	FString DeferredAltSkeletonSearchRoot;
-	FString DeferredPackagePath; // character base path
+	FString DeferredPackagePath;
 	bool bDeferredCompleted = false;
+
+	// Naming/location
+	FString DeferredAnimFolder;
+	FString DeferredDesiredIKName;
+	bool bDeferredOverwriteIK = false;
 #endif
 };

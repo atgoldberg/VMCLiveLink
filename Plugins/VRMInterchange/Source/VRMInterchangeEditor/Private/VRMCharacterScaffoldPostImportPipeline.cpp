@@ -9,7 +9,6 @@
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
-#include "UObject/SavePackage.h"
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -17,59 +16,65 @@
 #include "Animation/AnimBlueprintGeneratedClass.h"
 #include "Engine/Blueprint.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "VRMInterchangeSettings.h" // project settings
+#include "VRMInterchangeSettings.h"
 
+#if WITH_EDITOR
+#include "UnrealEdGlobals.h"
+#include "Subsystems/ImportSubsystem.h"
+#endif
+
+// Stage names/paths and defer creation to post-import (after dialog confirmation)
 void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
+	Super::ExecutePipeline(BaseNodeContainer, SourceDatas, ContentBasePath);
+
 	// Project setting gate
 	if (const UVRMInterchangeSettings* Settings = GetDefault<UVRMInterchangeSettings>())
 	{
 		if (!Settings->bGenerateLiveLinkEnabledActor)
 		{
-			return; // disabled globally
+			return;
 		}
 	}
 
-	if(!bGenerateScaffold) return; // per-instance toggle
+	if(!bGenerateScaffold) return;
 	if(!BaseNodeContainer) return;
-	const UInterchangeSourceData* Source=nullptr; for(const UInterchangeSourceData* SD:SourceDatas){ if(SD){ Source=SD; break; }} if(!Source) return;
+
+	const UInterchangeSourceData* Source=nullptr;
+	for(const UInterchangeSourceData* SD:SourceDatas){ if(SD){ Source=SD; break; }}
+	if(!Source) return;
+
 	const FString Filename = Source->GetFilename();
 	const FString CharacterBasePath = MakeCharacterBasePath(Filename, ContentBasePath);
-	DeferredPackagePath = CharacterBasePath; // for deferred
+	DeferredPackagePath = CharacterBasePath;
+	DeferredSkeletonSearchRoot = CharacterBasePath;
+	DeferredAltSkeletonSearchRoot = GetParentPackagePath(CharacterBasePath);
+
 	const FString CharacterName = FPaths::GetBaseFilename(Filename);
-	// Target names
-	const FString ActorBPName = FString::Printf(TEXT("BP_VRM_%s"), *CharacterName);
-	const FString AnimBPName  = FString::Printf(TEXT("ABP_VRM_%s"), *CharacterName);
 	// LiveLink folder root
 	const FString LiveLinkFolder = CharacterBasePath / TEXT("LiveLink");
 	const FString AnimFolder = LiveLinkFolder / AnimationSubFolder;
 
-	USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr;
-	const bool bFoundHere = FindImportedSkeletalAssets(CharacterBasePath, SkelMesh, Skeleton) && (SkelMesh||Skeleton);
-	const bool bFoundParent = !bFoundHere && FindImportedSkeletalAssets(GetParentPackagePath(CharacterBasePath), SkelMesh, Skeleton) && (SkelMesh||Skeleton);
+	// Cache desired asset names and locations for post-import creation
+	DeferredActorBPPath = LiveLinkFolder;
+	DeferredAnimBPPath = AnimFolder;
+	DeferredActorBPName = FString::Printf(TEXT("BP_VRM_%s"), *CharacterName);
+	DeferredAnimBPName  = FString::Printf(TEXT("ABP_VRM_%s"), *CharacterName);
+	bDeferredOverwrite = bOverwriteExisting;
 
-	// Duplicate templates now (reserve names)
-	UObject* ActorBPObj = DuplicateTemplate(TEXT("/VRMInterchange/BP_VRM_Template.BP_VRM_Template"), LiveLinkFolder, ActorBPName, bOverwriteExisting);
-	UObject* AnimBPObj  = DuplicateTemplate(TEXT("/VRMInterchange/Animation/ABP_VRM_Template.ABP_VRM_Template"), AnimFolder, AnimBPName, bOverwriteExisting);
-	UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(AnimBPObj);
-
-	if(!bFoundHere && !bFoundParent)
-	{
-		// defer skeletal assignments
-		DeferredActorBPPath = LiveLinkFolder; DeferredActorBPName = ActorBPName; DeferredAnimBPPath = AnimFolder; DeferredAnimBPName = AnimBPName; bDeferredOverwrite = bOverwriteExisting; RegisterDeferred(CharacterBasePath, CharacterBasePath); DeferredAltSkeletonSearchRoot = GetParentPackagePath(CharacterBasePath); return; }
-
-	if(SkelMesh && AnimBP)
-	{
-		SetPreviewMeshOnAnimBP(AnimBP, SkelMesh);
-	}
-	if(ActorBPObj && SkelMesh)
-	{
-		AssignSkeletalMeshToActorBP(ActorBPObj, SkelMesh);
-		if(AnimBP) AssignAnimBPToActorBP(ActorBPObj, AnimBP);
-	}
+	// Do NOT duplicate here; defer until after import is confirmed and skeletal assets exist
+	RegisterPostImportCommit();
 #endif
 }
+
+#if WITH_EDITOR
+void UVRMCharacterScaffoldPostImportPipeline::BeginDestroy()
+{
+	UnregisterPostImportCommit();
+	Super::BeginDestroy();
+}
+#endif
 
 #if WITH_EDITOR
 
@@ -90,8 +95,7 @@ UObject* UVRMCharacterScaffoldPostImportPipeline::DuplicateTemplate(const TCHAR*
 
 bool UVRMCharacterScaffoldPostImportPipeline::AssignSkeletalMeshToActorBP(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const
 {
-	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj); if(!BP||!SkeletalMesh) return false; if(!BP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(BP);} UClass* GenClass=BP->GeneratedClass; if(!GenClass) return false; UObject* CDO=GenClass->GetDefaultObject(); if(!CDO) return false; // find a USkeletalMeshComponent property named something common (e.g., SkeletalMeshComponent, Mesh, SkeletalMesh)
-	USkeletalMeshComponent* FoundComp=nullptr; for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) { if(USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) { FoundComp = SKC; break; }} if(!FoundComp){ return false; } FoundComp->SetSkeletalMesh(SkeletalMesh); FoundComp->MarkPackageDirty(); BP->MarkPackageDirty(); return true; }
+	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj); if(!BP||!SkeletalMesh) return false; if(!BP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(BP);} UClass* GenClass=BP->GeneratedClass; if(!GenClass) return false; UObject* CDO=GenClass->GetDefaultObject(); if(!CDO) return false; USkeletalMeshComponent* FoundComp=nullptr; for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) { if(USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) { FoundComp = SKC; break; }} if(!FoundComp){ return false; } FoundComp->SetSkeletalMesh(SkeletalMesh); FoundComp->MarkPackageDirty(); BP->MarkPackageDirty(); return true; }
 
 bool UVRMCharacterScaffoldPostImportPipeline::AssignAnimBPToActorBP(UObject* ActorBlueprintObj, UAnimBlueprint* AnimBP) const
 {
@@ -101,24 +105,76 @@ bool UVRMCharacterScaffoldPostImportPipeline::SetPreviewMeshOnAnimBP(UAnimBluepr
 {
 	if(!AnimBP||!SkeletalMesh) return false; AnimBP->SetPreviewMesh(SkeletalMesh); AnimBP->MarkPackageDirty(); return true; }
 
-void UVRMCharacterScaffoldPostImportPipeline::RegisterDeferred(const FString& InSkeletonSearchRoot, const FString& InPackagePath)
+void UVRMCharacterScaffoldPostImportPipeline::RegisterPostImportCommit()
 {
-	UnregisterDeferred(); DeferredSkeletonSearchRoot=InSkeletonSearchRoot; DeferredAltSkeletonSearchRoot=GetParentPackagePath(InSkeletonSearchRoot); DeferredPackagePath=InPackagePath; bDeferredCompleted=false; FAssetRegistryModule& ARM=FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry"); DeferredHandle=ARM.Get().OnAssetAdded().AddUObject(this,&UVRMCharacterScaffoldPostImportPipeline::OnAssetAddedDeferred); }
-
-void UVRMCharacterScaffoldPostImportPipeline::UnregisterDeferred()
-{
-	if(DeferredHandle.IsValid()) { if(FModuleManager::Get().IsModuleLoaded("AssetRegistry")){ FAssetRegistryModule& ARM=FModuleManager::GetModuleChecked<FAssetRegistryModule>("AssetRegistry"); ARM.Get().OnAssetAdded().Remove(DeferredHandle);} DeferredHandle.Reset(); }
+	if (ImportPostHandle.IsValid())
+	{
+		return;
+	}
+	if (UImportSubsystem* ImportSubsystem = GEditor ? GEditor->GetEditorSubsystem<UImportSubsystem>() : nullptr)
+	{
+		ImportPostHandle = ImportSubsystem->OnAssetPostImport.AddUObject(this, &UVRMCharacterScaffoldPostImportPipeline::OnAssetPostImport);
+	}
 }
 
-void UVRMCharacterScaffoldPostImportPipeline::OnAssetAddedDeferred(const FAssetData& AssetData)
+void UVRMCharacterScaffoldPostImportPipeline::UnregisterPostImportCommit()
 {
-	if(bDeferredCompleted||!AssetData.IsValid()) return; const FName ClassName=AssetData.AssetClassPath.GetAssetName(); const bool bIsSkeletalMesh=(ClassName==USkeletalMesh::StaticClass()->GetFName()); const bool bIsSkeleton=(ClassName==USkeleton::StaticClass()->GetFName()); if(!bIsSkeletalMesh&&!bIsSkeleton) return; const FString PkgPath=AssetData.PackagePath.ToString(); if(!PkgPath.StartsWith(DeferredSkeletonSearchRoot)&&!PkgPath.StartsWith(DeferredAltSkeletonSearchRoot)) return; USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr; bool bFound=FindImportedSkeletalAssets(DeferredSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) bFound=FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton); if(!bFound) return; // Load previously duplicated assets (in LiveLink folder structure)
-	UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(StaticLoadObject(UAnimBlueprint::StaticClass(), nullptr, *(DeferredAnimBPPath + TEXT("/") + DeferredAnimBPName + TEXT(".") + DeferredAnimBPName)));
-	UBlueprint* ActorBP = Cast<UBlueprint>(StaticLoadObject(UBlueprint::StaticClass(), nullptr, *(DeferredActorBPPath + TEXT("/") + DeferredActorBPName + TEXT(".") + DeferredActorBPName)));
-	if(SkelMesh && AnimBP){ SetPreviewMeshOnAnimBP(AnimBP, SkelMesh); }
-	if(ActorBP && SkelMesh){ AssignSkeletalMeshToActorBP(ActorBP, SkelMesh); if(AnimBP) AssignAnimBPToActorBP(ActorBP, AnimBP); }
-	if(AnimBP){ if(UPackage* P=AnimBP->GetOutermost()){ const FString FN=FPackageName::LongPackageNameToFilename(P->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(P,nullptr,*FN,SaveArgs);} }
-	if(ActorBP){ if(UPackage* P=ActorBP->GetOutermost()){ const FString FN=FPackageName::LongPackageNameToFilename(P->GetName(),FPackageName::GetAssetPackageExtension()); FSavePackageArgs SaveArgs; SaveArgs.TopLevelFlags=RF_Public|RF_Standalone; SaveArgs.SaveFlags=SAVE_NoError; UPackage::SavePackage(P,nullptr,*FN,SaveArgs);} }
-	UnregisterDeferred(); bDeferredCompleted=true; }
+	if (ImportPostHandle.IsValid())
+	{
+		if (UImportSubsystem* ImportSubsystem = GEditor ? GEditor->GetEditorSubsystem<UImportSubsystem>() : nullptr)
+		{
+			ImportSubsystem->OnAssetPostImport.Remove(ImportPostHandle);
+		}
+		ImportPostHandle.Reset();
+	}
+}
+
+void UVRMCharacterScaffoldPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject* InCreatedObject)
+{
+	if (bDeferredCompleted || !InCreatedObject)
+	{
+		return;
+	}
+
+	const bool bIsSkelMesh = InCreatedObject->IsA<USkeletalMesh>();
+	const bool bIsSkeleton = InCreatedObject->IsA<USkeleton>();
+	if (!bIsSkelMesh && !bIsSkeleton)
+	{
+		return;
+	}
+
+	const FString PkgPath = InCreatedObject->GetOutermost()->GetPathName();
+	if (!PkgPath.StartsWith(DeferredSkeletonSearchRoot) && !PkgPath.StartsWith(DeferredAltSkeletonSearchRoot))
+	{
+		return;
+	}
+
+	// Resolve skeletal assets
+	USkeletalMesh* SkelMesh=nullptr; USkeleton* Skeleton=nullptr;
+	bool bFound=FindImportedSkeletalAssets(DeferredSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton);
+	if(!bFound) bFound=FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton);
+	if(!bFound) return;
+
+	// Create assets now, then wire them up
+	UBlueprint* ActorBP = Cast<UBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/BP_VRM_Template.BP_VRM_Template"), DeferredActorBPPath, DeferredActorBPName, bDeferredOverwrite));
+	UAnimBlueprint* AnimBP  = Cast<UAnimBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/Animation/ABP_VRM_Template.ABP_VRM_Template"), DeferredAnimBPPath, DeferredAnimBPName, bDeferredOverwrite));
+
+	if (SkelMesh && AnimBP)
+	{
+		SetPreviewMeshOnAnimBP(AnimBP, SkelMesh);
+	}
+	if (ActorBP && SkelMesh)
+	{
+		AssignSkeletalMeshToActorBP(ActorBP, SkelMesh);
+		if (AnimBP) AssignAnimBPToActorBP(ActorBP, AnimBP);
+	}
+
+	// Leave packages dirty; let editor Save/SCC handle persistence
+	if (AnimBP)  { AnimBP->MarkPackageDirty(); }
+	if (ActorBP) { ActorBP->MarkPackageDirty(); }
+
+	bDeferredCompleted = true;
+	UnregisterPostImportCommit();
+}
 
 #endif

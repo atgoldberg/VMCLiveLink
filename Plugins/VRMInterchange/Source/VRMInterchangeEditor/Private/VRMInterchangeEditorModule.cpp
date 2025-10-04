@@ -142,7 +142,7 @@ void FVRMInterchangeEditorModule::StartupModule()
 void FVRMInterchangeEditorModule::ShutdownModule()
 {
 #if WITH_EDITOR
-	HandlePreExit();
+    // HandlePreExit is already bound to FCoreDelegates::OnPreExit; don't call it again here.
 #endif
 }
 
