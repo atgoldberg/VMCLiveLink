@@ -29,7 +29,10 @@ public:
 #if WITH_EDITOR
 	virtual void PostInitProperties() override;
 
-	// Dialog toggles (defaults loaded from project settings)
+	/** The name of the pipeline that will be display in the import dialog. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Common", meta = (StandAlonePipelineProperty = "True", PipelineInternalEditionData = "True"))
+	FString PipelineDisplayName = "VRM Spring Bones Import and Configuration";	// Dialog toggles (defaults loaded from project settings)
+  
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
 	bool bGenerateSpringBoneData = true;
 
@@ -53,9 +56,6 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
 	FString SubFolder = TEXT("SpringBones");
-
-	UPROPERTY(EditAnywhere, Category = "VRM Spring")
-	FString DataAssetName = TEXT("SpringBonesData");
 #endif
 
 	// UInterchangePipelineBase

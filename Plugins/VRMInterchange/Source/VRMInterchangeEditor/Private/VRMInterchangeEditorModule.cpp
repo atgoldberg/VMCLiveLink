@@ -4,13 +4,14 @@
 #include "Modules/ModuleManager.h"
 #include "VRMSpringBonesPostImportPipeline.h"
 #include "VRMIKRigPostImportPipeline.h"
-#include "VRMCharacterScaffoldPostImportPipeline.h"
+#include "VRMLiveLinkPostImportPipeline.h"
 #include "InterchangeProjectSettings.h"
 #include "VRMTranslator.h"
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "VRMDeletedImportManager.h"
 #include "VRMSpringBoneData.h"
 #include "Editor.h"
+
+namespace { }
 
 namespace
 {
@@ -35,10 +36,28 @@ static UObject* FindPluginDefaultVRMIKRigPipelineAsset()
 	return nullptr;
 }
 
-static UObject* FindPluginDefaultCharacterScaffoldPipelineAsset()
+static UObject* FindPluginDefaultLiveLinkPipelineAsset()
 {
-	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMCharacterScaffoldPipeline.DefaultVRMCharacterScaffoldPipeline");
-	if (UObject* Existing = StaticLoadObject(UVRMCharacterScaffoldPostImportPipeline::StaticClass(), nullptr, PluginObjectPath))
+	// Try new asset name first (if plugin content updated)
+	const TCHAR* NewPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMLiveLinkPipeline.DefaultVRMLiveLinkPipeline");
+	if (UObject* Existing = StaticLoadObject(UVRMLiveLinkPostImportPipeline::StaticClass(), nullptr, NewPath))
+	{
+		return Existing;
+	}
+	// Fallback to legacy asset path if it still exists in the plugin content
+	const TCHAR* LegacyPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMCharacterScaffoldPipeline.DefaultVRMCharacterScaffoldPipeline");
+	if (UObject* Legacy = StaticLoadObject(UObject::StaticClass(), nullptr, LegacyPath))
+	{
+		return Legacy;
+	}
+	return nullptr;
+}
+
+// New: Locate the plugin's DefaultVRMAssetsPipeline asset (same folder as other pipelines).
+static UObject* FindPluginDefaultVRMAssetsPipelineAsset()
+{
+	const TCHAR* PluginObjectPath = TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMAssetsPipeline.DefaultVRMAssetsPipeline");
+	if (UObject* Existing = StaticLoadObject(UObject::StaticClass(), nullptr, PluginObjectPath))
 	{
 		return Existing;
 	}
@@ -86,38 +105,141 @@ static void AppendVRMIKRigPipeline()
 {
 	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>(); if(!Settings) return; FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings,false); FInterchangeTranslatorPipelines* Per=EnsurePerTranslator(*Settings,ImportSettings); if(!Per) return; bool bDirty=false; if(UObject* PluginPipeline=FindPluginDefaultVRMIKRigPipelineAsset()) { AppendPipelineIfMissing(Per,FSoftObjectPath(PluginPipeline),bDirty);} else { AppendPipelineIfMissing(Per,FSoftObjectPath(TEXT("/Script/VRMInterchangeEditor.VRMIKRigPostImportPipeline")),bDirty);} if(bDirty) Settings->SaveConfig(); }
 
-static void AppendVRMCharacterScaffoldPipeline()
+static void AppendVRMLiveLinkPipeline()
 {
-	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>(); if(!Settings) return; FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings,false); FInterchangeTranslatorPipelines* Per=EnsurePerTranslator(*Settings,ImportSettings); if(!Per) return; bool bDirty=false; if(UObject* PluginPipeline=FindPluginDefaultCharacterScaffoldPipelineAsset()) { AppendPipelineIfMissing(Per,FSoftObjectPath(PluginPipeline),bDirty);} else { AppendPipelineIfMissing(Per,FSoftObjectPath(TEXT("/Script/VRMInterchangeEditor.VRMCharacterScaffoldPostImportPipeline")),bDirty);} if(bDirty) Settings->SaveConfig(); }
+	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>(); if(!Settings) return; FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings,false); FInterchangeTranslatorPipelines* Per=EnsurePerTranslator(*Settings,ImportSettings); if(!Per) return; bool bDirty=false; if(UObject* PluginPipeline=FindPluginDefaultLiveLinkPipelineAsset()) { AppendPipelineIfMissing(Per,FSoftObjectPath(PluginPipeline),bDirty);} else { AppendPipelineIfMissing(Per,FSoftObjectPath(TEXT("/Script/VRMInterchangeEditor.VRMLiveLinkPostImportPipeline")),bDirty);} if(bDirty) Settings->SaveConfig(); }
 
-// Track hashes of spring data assets created this session but never (successfully) saved.
-static TSet<FString> GUnsavedSpringDataHashes;
-
-static void RegisterSpringDataCreation(UVRMSpringBoneData* Asset)
+// New: Ensure the first pipeline in the VRM translator's Assets stack is DefaultVRMAssetsPipeline
+static void EnsureVRMAssetsPipelineIsFirst()
 {
-	if (Asset && !Asset->SourceHash.IsEmpty())
+	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>();
+	if (!Settings) return;
+
+	FInterchangeImportSettings& ImportSettings = FInterchangeProjectSettingsUtils::GetMutableImportSettings(*Settings, false);
+	FInterchangeTranslatorPipelines* Per = EnsurePerTranslator(*Settings, ImportSettings);
+	if (!Per) return;
+
+	bool bDirty = false;
+
+	// Resolve desired path (prefer the plugin asset; fallback to soft path string)
+	FSoftObjectPath DesiredPath;
+	if (UObject* PluginPipeline = FindPluginDefaultVRMAssetsPipelineAsset())
 	{
-		GUnsavedSpringDataHashes.Add(Asset->SourceHash);
+		DesiredPath = FSoftObjectPath(PluginPipeline);
 	}
-}
-
-static void RegisterSpringDataSaved(UVRMSpringBoneData* Asset)
-{
-	if (Asset && !Asset->SourceHash.IsEmpty())
+	else
 	{
-		GUnsavedSpringDataHashes.Remove(Asset->SourceHash);
+		DesiredPath = FSoftObjectPath(TEXT("/VRMInterchange/DefaultPipelines/DefaultVRMAssetsPipeline.DefaultVRMAssetsPipeline"));
 	}
-}
 
-static void HandlePreExit()
-{
-	if (GUnsavedSpringDataHashes.Num() > 0)
+	// Remove any default Interchange Assets pipeline entries that UE may auto-insert
 	{
-		for (const FString& Hash : GUnsavedSpringDataHashes)
+		auto IsDefaultAssetsPipeline = [](const FSoftObjectPath& P)->bool
 		{
-			FVRMDeletedImportManager::Get().Add(Hash);
+			const FString S = P.ToString();
+			return S.Contains(TEXT("DefaultAssetsPipeline"))
+				|| S.Equals(TEXT("/Script/InterchangePipelines.InterchangeGenericAssetsPipeline"))
+				|| S.Equals(TEXT("/Script/InterchangeEditor.InterchangeGenericAssetsPipeline"));
+		};
+		for (int32 i = Per->Pipelines.Num()-1; i >= 0; --i)
+		{
+			if (IsDefaultAssetsPipeline(Per->Pipelines[i]))
+			{
+				Per->Pipelines.RemoveAt(i);
+				bDirty = true;
+			}
 		}
-		GUnsavedSpringDataHashes.Empty();
+	}
+
+	// If first differs, move or insert DesiredPath to index 0 and avoid duplicates.
+	if (Per->Pipelines.Num() == 0)
+	{
+		Per->Pipelines.Add(DesiredPath);
+		bDirty = true;
+	}
+	else if (Per->Pipelines[0].ToString() != DesiredPath.ToString())
+	{
+		int32 ExistingIndex = INDEX_NONE;
+		for (int32 i = 0; i < Per->Pipelines.Num(); ++i)
+		{
+			if (Per->Pipelines[i].ToString() == DesiredPath.ToString())
+			{
+				ExistingIndex = i;
+				break;
+			}
+		}
+		if (ExistingIndex != INDEX_NONE)
+		{
+			Per->Pipelines.RemoveAt(ExistingIndex);
+		}
+		Per->Pipelines.Insert(DesiredPath, 0);
+		bDirty = true;
+	}
+
+	// Ensure no duplicates of DesiredPath beyond index 0
+	for (int32 i = Per->Pipelines.Num()-1; i > 0; --i)
+	{
+		if (Per->Pipelines[i].ToString() == DesiredPath.ToString())
+		{
+			Per->Pipelines.RemoveAt(i);
+			bDirty = true;
+		}
+	}
+
+	if (bDirty)
+	{
+		Settings->SaveConfig();
+	}
+}
+
+// New: Ensure "Textures" dialog override includes VRMTranslator with both dialog flags enabled
+static void EnsureVRMImportDialogOverrideForTextures()
+{
+	UInterchangeProjectSettings* Settings = GetMutableDefault<UInterchangeProjectSettings>();
+	if (!Settings) return;
+
+	bool bDirty = false;
+
+	// Access the Content Import Settings map: Show Import Dialog Override -> Textures (enum key)
+	auto& OverrideMap = Settings->ContentImportSettings.ShowImportDialogOverride;
+	auto& TexturesOverride = OverrideMap.FindOrAdd(EInterchangeTranslatorAssetType::Textures);
+
+	// Find or add per-translator override for VRMTranslator
+	auto& PerTranslator = TexturesOverride.PerTranslatorImportDialogOverride;
+	const FString VRMTranslatorPath = UVRMTranslator::StaticClass()->GetPathName();
+
+	int32 FoundIndex = INDEX_NONE;
+	for (int32 i = 0; i < PerTranslator.Num(); ++i)
+	{
+		if (PerTranslator[i].Translator.ToSoftObjectPath().ToString() == VRMTranslatorPath)
+		{
+			FoundIndex = i;
+			break;
+		}
+	}
+
+	if (FoundIndex == INDEX_NONE)
+	{
+		FoundIndex = PerTranslator.AddDefaulted();
+		PerTranslator[FoundIndex].Translator = UVRMTranslator::StaticClass();
+		bDirty = true;
+	}
+
+	// Ensure both flags are enabled
+	if (!PerTranslator[FoundIndex].bShowImportDialog)
+	{
+		PerTranslator[FoundIndex].bShowImportDialog = true;
+		bDirty = true;
+	}
+	if (!PerTranslator[FoundIndex].bShowReimportDialog)
+	{
+		PerTranslator[FoundIndex].bShowReimportDialog = true;
+		bDirty = true;
+	}
+
+	if (bDirty)
+	{
+		Settings->SaveConfig();
 	}
 }
 #endif // WITH_EDITOR
@@ -130,12 +252,15 @@ void FVRMInterchangeEditorModule::StartupModule()
 {
 	UVRMSpringBonesPostImportPipeline::StaticClass();
 	UVRMIKRigPostImportPipeline::StaticClass();
-	UVRMCharacterScaffoldPostImportPipeline::StaticClass();
+	UVRMLiveLinkPostImportPipeline::StaticClass();
 #if WITH_EDITOR
 	AppendVRMSpringBonesPipeline();
 	AppendVRMIKRigPipeline();
-	AppendVRMCharacterScaffoldPipeline();
-	FCoreDelegates::OnPreExit.AddStatic(&HandlePreExit);
+	AppendVRMLiveLinkPipeline();
+	EnsureVRMAssetsPipelineIsFirst();
+
+	// New: Ensure dialog override for VRM textures
+	EnsureVRMImportDialogOverrideForTextures();
 #endif
 }
 
@@ -147,13 +272,13 @@ void FVRMInterchangeEditorModule::ShutdownModule()
 }
 
 #if WITH_EDITOR
-void FVRMInterchangeEditorModule::NotifySpringDataCreated(UVRMSpringBoneData* Asset)
+void FVRMInterchangeEditorModule::NotifySpringDataCreated(UVRMSpringBoneData* /*Asset*/)
 {
-	RegisterSpringDataCreation(Asset);
+	// no-op
 }
 
-void FVRMInterchangeEditorModule::NotifySpringDataSaved(UVRMSpringBoneData* Asset)
+void FVRMInterchangeEditorModule::NotifySpringDataSaved(UVRMSpringBoneData* /*Asset*/)
 {
-	RegisterSpringDataSaved(Asset);
+	// no-op
 }
 #endif

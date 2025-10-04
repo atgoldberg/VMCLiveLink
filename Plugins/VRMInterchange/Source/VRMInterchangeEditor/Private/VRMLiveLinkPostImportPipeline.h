@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "InterchangePipelineBase.h"
-#include "VRMCharacterScaffoldPostImportPipeline.generated.h"
+#include "VRMLiveLinkPostImportPipeline.generated.h"
 
 class UInterchangeBaseNodeContainer;
 class UInterchangeSourceData;
@@ -13,24 +13,28 @@ class UAnimBlueprint;
 class UFactory;
 
 /**
- * VRM Character Scaffold (Post-Import)
+ * VRM Live Link (Post-Import)
  *
  * - Runs after the user confirms the Interchange import dialog.
  * - Duplicates a character Actor Blueprint and an AnimBlueprint from templates.
  * - Wires up the imported SkeletalMesh to the actor and sets the preview mesh on the AnimBP.
  * - Does NOT save packages during import; marks packages dirty so Save All/SCC handle persistence.
  */
-UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced, ClassGroup=(Interchange), meta=(DisplayName="VRM Character (Post-Import)"))
-class VRMINTERCHANGEEDITOR_API UVRMCharacterScaffoldPostImportPipeline : public UInterchangePipelineBase
+UCLASS(BlueprintType, EditInlineNew, DefaultToInstanced, ClassGroup=(Interchange), meta=(DisplayName="VRM Live Link (Post-Import)"))
+class VRMINTERCHANGEEDITOR_API UVRMLiveLinkPostImportPipeline : public UInterchangePipelineBase
 {
 	GENERATED_BODY()
 public:
-	UVRMCharacterScaffoldPostImportPipeline() = default;
+	UVRMLiveLinkPostImportPipeline() = default;
 
 #if WITH_EDITOR
+	/** The name of the pipeline that will be display in the import dialog. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Common", meta = (StandAlonePipelineProperty = "True", PipelineInternalEditionData = "True"))
+	FString PipelineDisplayName = "Live Link Actor Set-up";
+
 	/** Generate the LiveLink-enabled Actor + AnimBP scaffold assets */
 	UPROPERTY(EditAnywhere, Category="VRM Character")
-	bool bGenerateScaffold = true;
+	bool bGenerateLiveLinkEnabledActor = true;
 
 	/** If true, overwrite existing assets with the same names; otherwise create unique names */
 	UPROPERTY(EditAnywhere, Category="VRM Character")

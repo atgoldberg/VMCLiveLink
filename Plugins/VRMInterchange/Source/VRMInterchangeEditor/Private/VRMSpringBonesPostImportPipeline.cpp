@@ -13,7 +13,6 @@
 #include "AssetToolsModule.h"
 #include "Factories/Factory.h"
 #include "IAssetTools.h"
-#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
@@ -21,7 +20,6 @@
 #include "VRMSpringBonesParser.h"
 #include "VRMInterchangeLog.h"
 #include "VRMInterchangeSettings.h"
-#include "VRMDeletedImportManager.h"
 
 #if WITH_EDITOR
 #include "UnrealEdGlobals.h"
@@ -100,27 +98,20 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
 
     const FString Filename = Source->GetFilename();
 
-    FString PackagePath, SpringAssetName;
-    MakeTargetPathAndName(Filename, ContentBasePath, PackagePath, SpringAssetName);
+    // Compute character base package path only; defer asset naming to post-import.
+    const FString BaseName = FPaths::GetBaseFilename(Filename);
+    const FString PackagePath = !ContentBasePath.IsEmpty()
+        ? (ContentBasePath / BaseName)
+        : FString::Printf(TEXT("/Game/%s"), *BaseName);
 
     const FString SkeletonSearchRoot = PackagePath;
     const FString ParentSearchRoot   = GetParentPackagePath(SkeletonSearchRoot);
-
-    if (!DataAssetName.IsEmpty())
-    {
-        SpringAssetName = DataAssetName;
-    }
 
     // Early tombstone check
     FString SourceHash;
     if (FPaths::FileExists(Filename))
     {
         SourceHash = LexToString(FMD5Hash::HashFile(*Filename));
-        if (FVRMDeletedImportManager::Get().Contains(SourceHash))
-        {
-            UE_LOG(LogVRMSpring, Log, TEXT("[VRMInterchange] Spring pipeline: Suppressing regeneration (tombstoned) for '%s' hash %s."), *Filename, *SourceHash);
-            return;
-        }
     }
 
     // Prepare transient spring data (no assets created on disk)
@@ -150,21 +141,19 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
     const bool bWantsAssign = (bAssignPostProcessABP || (Settings && Settings->bAssignPostProcessABP));
 
     // Stage state for the post-import commit
-    DeferredSkeletonSearchRoot   = SkeletonSearchRoot;
-    DeferredAltSkeletonSearchRoot= ParentSearchRoot;
-    DeferredPackagePath          = PackagePath;
-    DeferredSourceFilename       = Filename;
-    DeferredSourceHash           = SourceHash;
-    bDeferredWantsAssign         = bWantsAssign;
-    bDeferredOverwriteABP        = bWantsABPOverwrite;
-    bDeferredOverwriteSpringAsset= bWantsOverwrite;
-    bDeferredReuseABP            = bWantsReuseABP;
+    DeferredSkeletonSearchRoot    = SkeletonSearchRoot;
+    DeferredAltSkeletonSearchRoot = ParentSearchRoot;
+    DeferredPackagePath           = PackagePath;
+    DeferredSourceFilename        = Filename;
+    DeferredSourceHash            = SourceHash;
+    bDeferredWantsAssign          = bWantsAssign;
+    bDeferredOverwriteABP         = bWantsABPOverwrite;
+    bDeferredOverwriteSpringAsset = bWantsOverwrite;
+    bDeferredReuseABP             = bWantsReuseABP;
     DeferredSpringDataTransient.Reset(TransientSpringData);
 
-    // Naming/location for ABP
-    DeferredAnimFolder  = PackagePath / AnimationSubFolder;
-    const FString CharacterName = FPaths::GetBaseFilename(Filename);
-    DeferredDesiredABPName = FString::Printf(TEXT("ABP_VRMSpringBones_%s"), *CharacterName);
+    // Location for ABP
+    DeferredAnimFolder = PackagePath / AnimationSubFolder;
 
     const bool bAnythingToDo = (bWantsSpringData && DeferredSpringDataTransient.IsValid()) || bWantsABP;
     if (bAnythingToDo)
@@ -216,14 +205,6 @@ bool UVRMSpringBonesPostImportPipeline::ParseAndFillDataAssetFromFile(const FStr
     return Dest->SpringConfig.IsValid();
 }
 
-FString UVRMSpringBonesPostImportPipeline::MakeTargetPathAndName(const FString& SourceFilename, const FString& ContentBasePath, FString& OutPackagePath, FString& OutAssetName) const
-{
-    const FString BaseName = FPaths::GetBaseFilename(SourceFilename);
-    OutPackagePath = !ContentBasePath.IsEmpty() ? (ContentBasePath / BaseName) : FString::Printf(TEXT("/Game/%s"), *BaseName);
-    OutAssetName = TEXT("SpringBonesData");
-    return OutPackagePath / OutAssetName;
-}
-
 bool UVRMSpringBonesPostImportPipeline::ResolveBoneNamesFromFile(const FString& Filename, FVRMSpringConfig& InOut, int32& OutResolvedColliders, int32& OutResolvedJoints, int32& OutResolvedCenters) const
 {
 #if VRM_HAS_CGLTF
@@ -259,7 +240,10 @@ void UVRMSpringBonesPostImportPipeline::ValidateBoneNamesAgainstSkeleton(const F
     USkeleton* Skeleton = FoundSkeletons.Num()>0?Cast<USkeleton>(FoundSkeletons[0].GetAsset()):nullptr;
     if (!Skeleton)
     {
-        FARFilter MeshFilter; MeshFilter.bRecursivePaths=true; MeshFilter.PackagePaths.Add(*SearchRootPackagePath); MeshFilter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
+        FARFilter MeshFilter; 
+        MeshFilter.bRecursivePaths=true;
+        MeshFilter.PackagePaths.Add(*SearchRootPackagePath);
+        MeshFilter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName());
         TArray<FAssetData> Meshes; ARM.Get().GetAssets(MeshFilter, Meshes);
         if (Meshes.Num()>0) if (USkeletalMesh* SM=Cast<USkeletalMesh>(Meshes[0].GetAsset())) Skeleton=SM->GetSkeleton();
     }
@@ -463,13 +447,12 @@ void UVRMSpringBonesPostImportPipeline::OnAssetPostImport(UFactory* InFactory, U
     UVRMSpringBoneData* SpringDataAsset = nullptr;
     if (DeferredSpringDataTransient.IsValid())
     {
-        FString SpringAssetName;
-        FString PackagePath;
-        MakeTargetPathAndName(DeferredSourceFilename, DeferredPackagePath, PackagePath, SpringAssetName);
-        if (!DataAssetName.IsEmpty())
-        {
-            SpringAssetName = DataAssetName;
-        }
+        // Use the staged character base path; name derives from the actual SkeletalMesh.
+        const FString PackagePath = DeferredPackagePath;
+
+        FString SpringAssetName = SkelMesh
+            ? (SkelMesh->GetName() + TEXT("_SpringData"))
+            : (FPaths::GetBaseFilename(DeferredSourceFilename) + TEXT("_SpringData"));
 
         FString SpringDataFolder = PackagePath;
         if (!SubFolder.IsEmpty())
@@ -497,7 +480,6 @@ void UVRMSpringBonesPostImportPipeline::OnAssetPostImport(UFactory* InFactory, U
             SpringDataAsset->SpringConfig = DeferredSpringDataTransient->SpringConfig;
             SpringDataAsset->NodeParent   = DeferredSpringDataTransient->NodeParent;
             SpringDataAsset->NodeChildren = DeferredSpringDataTransient->NodeChildren;
-            // Note: UVRMSpringBoneData may not expose a getter; use the map directly.
             SpringDataAsset->SetNodeToBoneMapping(DeferredSpringDataTransient->NodeToBoneMap);
             if (SpringDataAsset->NodeChildren.Num() > 0)
             {
@@ -519,6 +501,9 @@ void UVRMSpringBonesPostImportPipeline::OnAssetPostImport(UFactory* InFactory, U
     const bool bWantsABP = (bGeneratePostProcessAnimBP || (GetDefault<UVRMInterchangeSettings>()->bGeneratePostProcessAnimBP));
     if (bWantsABP)
     {
+        FString CharName = SkelMesh ? SkelMesh->GetName() : FPaths::GetBaseFilename(DeferredSourceFilename);
+        const FString EffectiveABPName = FString::Printf(TEXT("PP_ABP_VRMSpringBones_%s"), *CharName);
+
         UObject* ReusedOrDuplicatedABP = nullptr;
 
         if (bDeferredReuseABP)
@@ -533,7 +518,7 @@ void UVRMSpringBonesPostImportPipeline::OnAssetPostImport(UFactory* InFactory, U
             {
                 for (const FAssetData& AD : Found)
                 {
-                    if (AD.AssetName.ToString().Equals(DeferredDesiredABPName, ESearchCase::IgnoreCase))
+                    if (AD.AssetName.ToString().Equals(EffectiveABPName, ESearchCase::IgnoreCase))
                     {
                         ReusedOrDuplicatedABP = AD.GetAsset();
                         break;
@@ -559,7 +544,7 @@ void UVRMSpringBonesPostImportPipeline::OnAssetPostImport(UFactory* InFactory, U
         {
             ReusedOrDuplicatedABP = DuplicateTemplateAnimBlueprint(
                 DeferredAnimFolder,
-                DeferredDesiredABPName,
+                EffectiveABPName,
                 Skeleton ? Skeleton : (SkelMesh ? SkelMesh->GetSkeleton() : nullptr),
                 bDeferredOverwriteABP
             );

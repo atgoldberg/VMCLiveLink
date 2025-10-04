@@ -1,4 +1,4 @@
-#include "VRMCharacterScaffoldPostImportPipeline.h"
+#include "VRMLiveLinkPostImportPipeline.h"
 
 #include "InterchangeSourceData.h"
 #include "Nodes/InterchangeBaseNodeContainer.h"
@@ -24,7 +24,7 @@
 #endif
 
 // Stage names/paths and defer creation to post-import (after dialog confirmation)
-void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
+void UVRMLiveLinkPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContainer* BaseNodeContainer, const TArray<UInterchangeSourceData*>& SourceDatas, const FString& ContentBasePath)
 {
 #if WITH_EDITOR
 	Super::ExecutePipeline(BaseNodeContainer, SourceDatas, ContentBasePath);
@@ -38,7 +38,7 @@ void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNo
 		}
 	}
 
-	if(!bGenerateScaffold) return;
+	if(!bGenerateLiveLinkEnabledActor) return;
 	if(!BaseNodeContainer) return;
 
 	const UInterchangeSourceData* Source=nullptr;
@@ -69,7 +69,7 @@ void UVRMCharacterScaffoldPostImportPipeline::ExecutePipeline(UInterchangeBaseNo
 }
 
 #if WITH_EDITOR
-void UVRMCharacterScaffoldPostImportPipeline::BeginDestroy()
+void UVRMLiveLinkPostImportPipeline::BeginDestroy()
 {
 	UnregisterPostImportCommit();
 	Super::BeginDestroy();
@@ -78,34 +78,34 @@ void UVRMCharacterScaffoldPostImportPipeline::BeginDestroy()
 
 #if WITH_EDITOR
 
-bool UVRMCharacterScaffoldPostImportPipeline::FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const
+bool UVRMLiveLinkPostImportPipeline::FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const
 {
 	OutSkeletalMesh=nullptr; OutSkeleton=nullptr; if(SearchRootPackagePath.IsEmpty()) return false; FAssetRegistryModule& ARM=FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry"); FARFilter MeshFilter; MeshFilter.bRecursivePaths=true; MeshFilter.PackagePaths.Add(*SearchRootPackagePath); MeshFilter.ClassPaths.Add(USkeletalMesh::StaticClass()->GetClassPathName()); TArray<FAssetData> Meshes; ARM.Get().GetAssets(MeshFilter, Meshes); if(Meshes.Num()>0){ OutSkeletalMesh=Cast<USkeletalMesh>(Meshes[0].GetAsset()); if(OutSkeletalMesh) OutSkeleton=OutSkeletalMesh->GetSkeleton(); } if(!OutSkeleton){ FARFilter SkelFilter; SkelFilter.bRecursivePaths=true; SkelFilter.PackagePaths.Add(*SearchRootPackagePath); SkelFilter.ClassPaths.Add(USkeleton::StaticClass()->GetClassPathName()); TArray<FAssetData> Skels; ARM.Get().GetAssets(SkelFilter, Skels); if(Skels.Num()>0) OutSkeleton=Cast<USkeleton>(Skels[0].GetAsset()); } return (OutSkeletalMesh!=nullptr)||(OutSkeleton!=nullptr);
 }
 
-FString UVRMCharacterScaffoldPostImportPipeline::GetParentPackagePath(const FString& InPath) const
+FString UVRMLiveLinkPostImportPipeline::GetParentPackagePath(const FString& InPath) const
 { int32 SlashIdx=INDEX_NONE; return (InPath.FindLastChar(TEXT('/'),SlashIdx)&&SlashIdx>1)?InPath.Left(SlashIdx):InPath; }
 
-FString UVRMCharacterScaffoldPostImportPipeline::MakeCharacterBasePath(const FString& SourceFilename, const FString& ContentBasePath) const
+FString UVRMLiveLinkPostImportPipeline::MakeCharacterBasePath(const FString& SourceFilename, const FString& ContentBasePath) const
 { const FString BaseName = FPaths::GetBaseFilename(SourceFilename); return !ContentBasePath.IsEmpty() ? (ContentBasePath / BaseName) : FString::Printf(TEXT("/Game/%s"), *BaseName); }
 
-UObject* UVRMCharacterScaffoldPostImportPipeline::DuplicateTemplate(const TCHAR* TemplatePath, const FString& TargetPackagePath, const FString& DesiredName, bool bOverwrite) const
+UObject* UVRMLiveLinkPostImportPipeline::DuplicateTemplate(const TCHAR* TemplatePath, const FString& TargetPackagePath, const FString& DesiredName, bool bOverwrite) const
 {
 	if(!TemplatePath||TargetPackagePath.IsEmpty()||DesiredName.IsEmpty()) return nullptr; UObject* TemplateObj = StaticLoadObject(UObject::StaticClass(), nullptr, TemplatePath); if(!TemplateObj) return nullptr; FString NewAssetPath = TargetPackagePath / DesiredName; FAssetToolsModule& AssetToolsModule=FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools"); FString UniquePath,UniqueName; if(!bOverwrite) { AssetToolsModule.Get().CreateUniqueAssetName(NewAssetPath,TEXT(""),UniquePath,UniqueName);} else { UniquePath=NewAssetPath; UniqueName=DesiredName; } const FString LongPackage = UniquePath.StartsWith(TEXT("/"))?UniquePath:TEXT("/")+UniquePath; UPackage* Pkg=CreatePackage(*LongPackage); if(!Pkg) return nullptr; UObject* Duplicated=StaticDuplicateObject(TemplateObj,Pkg,*UniqueName); if(!Duplicated) return nullptr; FAssetRegistryModule::AssetCreated(Duplicated); if(UBlueprint* BP=Cast<UBlueprint>(Duplicated)) { FKismetEditorUtilities::CompileBlueprint(BP); } return Duplicated; }
 
-bool UVRMCharacterScaffoldPostImportPipeline::AssignSkeletalMeshToActorBP(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const
+bool UVRMLiveLinkPostImportPipeline::AssignSkeletalMeshToActorBP(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const
 {
 	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj); if(!BP||!SkeletalMesh) return false; if(!BP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(BP);} UClass* GenClass=BP->GeneratedClass; if(!GenClass) return false; UObject* CDO=GenClass->GetDefaultObject(); if(!CDO) return false; USkeletalMeshComponent* FoundComp=nullptr; for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) { if(USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) { FoundComp = SKC; break; }} if(!FoundComp){ return false; } FoundComp->SetSkeletalMesh(SkeletalMesh); FoundComp->MarkPackageDirty(); BP->MarkPackageDirty(); return true; }
 
-bool UVRMCharacterScaffoldPostImportPipeline::AssignAnimBPToActorBP(UObject* ActorBlueprintObj, UAnimBlueprint* AnimBP) const
+bool UVRMLiveLinkPostImportPipeline::AssignAnimBPToActorBP(UObject* ActorBlueprintObj, UAnimBlueprint* AnimBP) const
 {
 	if(!ActorBlueprintObj||!AnimBP) return false; if(!AnimBP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(AnimBP);} UClass* AnimClass=AnimBP->GeneratedClass; if(!AnimClass) return false; UBlueprint* BP=Cast<UBlueprint>(ActorBlueprintObj); if(!BP||!BP->GeneratedClass){ return false; } UObject* CDO=BP->GeneratedClass->GetDefaultObject(); if(!CDO) return false; USkeletalMeshComponent* FoundComp=nullptr; for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) { if(USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) { FoundComp = SKC; break; }} if(!FoundComp) return false; FoundComp->SetAnimInstanceClass(AnimClass); FoundComp->MarkPackageDirty(); BP->MarkPackageDirty(); AnimBP->MarkPackageDirty(); return true; }
 
-bool UVRMCharacterScaffoldPostImportPipeline::SetPreviewMeshOnAnimBP(UAnimBlueprint* AnimBP, USkeletalMesh* SkeletalMesh) const
+bool UVRMLiveLinkPostImportPipeline::SetPreviewMeshOnAnimBP(UAnimBlueprint* AnimBP, USkeletalMesh* SkeletalMesh) const
 {
 	if(!AnimBP||!SkeletalMesh) return false; AnimBP->SetPreviewMesh(SkeletalMesh); AnimBP->MarkPackageDirty(); return true; }
 
-void UVRMCharacterScaffoldPostImportPipeline::RegisterPostImportCommit()
+void UVRMLiveLinkPostImportPipeline::RegisterPostImportCommit()
 {
 	if (ImportPostHandle.IsValid())
 	{
@@ -113,11 +113,11 @@ void UVRMCharacterScaffoldPostImportPipeline::RegisterPostImportCommit()
 	}
 	if (UImportSubsystem* ImportSubsystem = GEditor ? GEditor->GetEditorSubsystem<UImportSubsystem>() : nullptr)
 	{
-		ImportPostHandle = ImportSubsystem->OnAssetPostImport.AddUObject(this, &UVRMCharacterScaffoldPostImportPipeline::OnAssetPostImport);
+		ImportPostHandle = ImportSubsystem->OnAssetPostImport.AddUObject(this, &UVRMLiveLinkPostImportPipeline::OnAssetPostImport);
 	}
 }
 
-void UVRMCharacterScaffoldPostImportPipeline::UnregisterPostImportCommit()
+void UVRMLiveLinkPostImportPipeline::UnregisterPostImportCommit()
 {
 	if (ImportPostHandle.IsValid())
 	{
@@ -129,7 +129,7 @@ void UVRMCharacterScaffoldPostImportPipeline::UnregisterPostImportCommit()
 	}
 }
 
-void UVRMCharacterScaffoldPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject* InCreatedObject)
+void UVRMLiveLinkPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObject* InCreatedObject)
 {
 	if (bDeferredCompleted || !InCreatedObject)
 	{
