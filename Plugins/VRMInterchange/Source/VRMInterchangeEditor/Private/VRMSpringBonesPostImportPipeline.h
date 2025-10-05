@@ -51,6 +51,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
 	bool bReusePostProcessABPOnReimport = true;
 
+	// Convert VRM units (meters) to UE units (centimeters) for SpringData on import.
+	// Disable if your source already uses UE scale.
+	UPROPERTY(EditAnywhere, Category = "VRM Spring")
+	bool bConvertToUEUnits = true;
+
 	UPROPERTY(EditAnywhere, Category = "VRM Spring")
 	FString AnimationSubFolder = TEXT("SpringBones");
 
@@ -72,6 +77,7 @@ private:
 	FString MakeTargetPathAndName(const FString& SourceFilename, const FString& ContentBasePath, FString& OutPackagePath, FString& OutAssetName) const;
 	bool ResolveBoneNamesFromFile(const FString& Filename, FVRMSpringConfig& InOut, int32& OutResolvedColliders, int32& OutResolvedJoints, int32& OutResolvedCenters) const;
 	void ValidateBoneNamesAgainstSkeleton(const FString& SearchRootPackagePath, const FVRMSpringConfig& Config) const;
+	void ConvertSpringConfigToUEUnits(FVRMSpringConfig& InOut) const;
 
 	// Asset helpers
 	bool FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const;

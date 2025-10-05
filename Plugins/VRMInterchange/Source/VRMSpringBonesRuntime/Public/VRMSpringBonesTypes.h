@@ -16,9 +16,9 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringColliderSphere
 {
     GENERATED_BODY()
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
-    UPROPERTY(VisibleAnywhere, Category="VRM") float Radius = 0.f;
-    UPROPERTY(VisibleAnywhere, Category="VRM") bool bInside = false;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Sphere") FVector Offset = FVector::ZeroVector;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Sphere", meta=(ClampMin="0.0")) float Radius = 0.f;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Sphere") bool bInside = false;
 };
 
 USTRUCT(BlueprintType)
@@ -26,10 +26,10 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringColliderCapsule
 {
     GENERATED_BODY()
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
-    UPROPERTY(VisibleAnywhere, Category="VRM") float Radius = 0.f;
-    UPROPERTY(VisibleAnywhere, Category="VRM") FVector TailOffset = FVector::ZeroVector;
-    UPROPERTY(VisibleAnywhere, Category="VRM") bool bInside = false;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Capsule") FVector Offset = FVector::ZeroVector;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Capsule", meta=(ClampMin="0.0")) float Radius = 0.f;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Capsule") FVector TailOffset = FVector::ZeroVector;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Capsule") bool bInside = false;
 };
 
 USTRUCT(BlueprintType)
@@ -37,8 +37,8 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringColliderPlane
 {
     GENERATED_BODY()
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Offset = FVector::ZeroVector;
-    UPROPERTY(VisibleAnywhere, Category="VRM") FVector Normal = FVector(0,0,1);
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Plane") FVector Offset = FVector::ZeroVector;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider|Plane") FVector Normal = FVector(0,0,1);
 };
 
 USTRUCT(BlueprintType)
@@ -46,11 +46,16 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringCollider
 {
     GENERATED_BODY()
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") int32 NodeIndex = INDEX_NONE;
-    UPROPERTY(VisibleAnywhere, Category="VRM") FName BoneName;
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderSphere> Spheres;
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderCapsule> Capsules;
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderPlane> Planes;
+    // You can use either NodeIndex (parsed from VRM) or BoneName (override) to bind this collider in runtime.
+    UPROPERTY(EditAnywhere, Category="VRM|Collider", meta=(ToolTip="Original VRM/glTF node index (informational / optional when BoneName is set)"))
+    int32 NodeIndex = INDEX_NONE;
+
+    UPROPERTY(EditAnywhere, Category="VRM|Collider", meta=(ToolTip="Unreal bone to which this collider is attached"))
+    FName BoneName;
+
+    UPROPERTY(EditAnywhere, Category="VRM|Collider") TArray<FVRMSpringColliderSphere> Spheres;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider") TArray<FVRMSpringColliderCapsule> Capsules;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider") TArray<FVRMSpringColliderPlane> Planes;
 };
 
 USTRUCT(BlueprintType)
@@ -58,8 +63,8 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringColliderGroup
 {
     GENERATED_BODY()
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") FString Name;
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<int32> ColliderIndices;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider Group") FString Name;
+    UPROPERTY(EditAnywhere, Category="VRM|Collider Group") TArray<int32> ColliderIndices;
 };
 
 USTRUCT(BlueprintType)
@@ -97,10 +102,17 @@ struct VRMSPRINGBONESRUNTIME_API FVRMSpringConfig
 
     UPROPERTY(VisibleAnywhere, Category="VRM") EVRMSpringSpec Spec = EVRMSpringSpec::None;
 
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringCollider> Colliders;
-    UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringColliderGroup> ColliderGroups;
+    // Now editable like Springs
+    UPROPERTY(EditAnywhere, Category="VRM|Colliders", meta=(TitleProperty="BoneName"))
+    TArray<FVRMSpringCollider> Colliders;
+
+    UPROPERTY(EditAnywhere, Category="VRM|Colliders", meta=(TitleProperty="Name"))
+    TArray<FVRMSpringColliderGroup> ColliderGroups;
+
     UPROPERTY(VisibleAnywhere, Category="VRM") TArray<FVRMSpringJoint> Joints;
-    UPROPERTY(EditAnywhere, Category="VRM", meta=(EditFixedSize)) TArray<FVRMSpring> Springs;
+
+    UPROPERTY(EditAnywhere, Category="VRM", meta=(EditFixedSize, TitleProperty="Name"))
+    TArray<FVRMSpring> Springs;
 
     UPROPERTY(VisibleAnywhere, Category="VRM") FString RawJson;
 

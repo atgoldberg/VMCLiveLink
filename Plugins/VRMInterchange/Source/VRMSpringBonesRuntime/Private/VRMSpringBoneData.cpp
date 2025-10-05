@@ -13,8 +13,17 @@ void UVRMSpringBoneData::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
     const FName MemberName = PropertyChangedEvent.MemberProperty ? PropertyChangedEvent.MemberProperty->GetFName() : NAME_None;
 
     static const TSet<FName> TunableNames = { TEXT("Stiffness"), TEXT("Drag"), TEXT("GravityDir"), TEXT("GravityPower"), TEXT("HitRadius") };
+    // Collider-related fields we care about for bumping/sanitizing
+    static const TSet<FName> ColliderNames = {
+        TEXT("Colliders"), TEXT("ColliderGroups"),
+        TEXT("Spheres"), TEXT("Capsules"), TEXT("Planes"),
+        TEXT("Offset"), TEXT("TailOffset"), TEXT("Normal"),
+        TEXT("Radius"), TEXT("bInside"),
+        TEXT("NodeIndex"), TEXT("BoneName")
+    };
 
     bool bBump = false;
+
     if (TunableNames.Contains(PropName) || TunableNames.Contains(MemberName))
     {
         bBump = true;
@@ -24,10 +33,22 @@ void UVRMSpringBoneData::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
     {
         bBump = true; 
     }
+    // Any collider or collider-group edit should bump as well
+    if (ColliderNames.Contains(PropName) || ColliderNames.Contains(MemberName))
+    {
+        bBump = true;
+    }
+    if (MemberName == TEXT("Colliders") || PropName == TEXT("Colliders") ||
+        MemberName == TEXT("ColliderGroups") || PropName == TEXT("ColliderGroups"))
+    {
+        bBump = true;
+    }
 
     if (bBump)
     {
         ++EditRevision;
+
+        // Clamp Spring tunables
         for (FVRMSpring& Spring : SpringConfig.Springs)
         {
             Spring.Stiffness = FMath::Clamp(Spring.Stiffness, 0.f, 1.f);
@@ -38,6 +59,30 @@ void UVRMSpringBoneData::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
             }
             Spring.GravityPower = FMath::Max(0.f, Spring.GravityPower);
             Spring.HitRadius = FMath::Max(0.f, Spring.HitRadius);
+        }
+
+        // Sanitize Colliders
+        for (FVRMSpringCollider& Col : SpringConfig.Colliders)
+        {
+            for (FVRMSpringColliderSphere& S : Col.Spheres)
+            {
+                S.Radius = FMath::Max(0.f, S.Radius);
+            }
+            for (FVRMSpringColliderCapsule& C : Col.Capsules)
+            {
+                C.Radius = FMath::Max(0.f, C.Radius);
+            }
+            for (FVRMSpringColliderPlane& P : Col.Planes)
+            {
+                if (P.Normal.IsNearlyZero())
+                {
+                    P.Normal = FVector(0,0,1);
+                }
+                else
+                {
+                    P.Normal = P.Normal.GetSafeNormal();
+                }
+            }
         }
     }
 }

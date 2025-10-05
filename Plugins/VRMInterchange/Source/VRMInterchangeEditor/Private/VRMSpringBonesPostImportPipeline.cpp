@@ -62,6 +62,7 @@ void UVRMSpringBonesPostImportPipeline::PostInitProperties()
             bAssignPostProcessABP       = Settings->bAssignPostProcessABP;
             bOverwriteExistingPostProcessABP = Settings->bOverwriteExistingPostProcessABP;
             bReusePostProcessABPOnReimport  = Settings->bReusePostProcessABPOnReimport;
+            // bConvertToUEUnits remains default-true unless a project setting is added later.
         }
     }
 }
@@ -128,6 +129,13 @@ void UVRMSpringBonesPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeCont
         {
             int32 ResolvedC=0, ResolvedJ=0, ResolvedCenters=0;
             ResolveBoneNamesFromFile(Filename, TransientSpringData->SpringConfig, ResolvedC, ResolvedJ, ResolvedCenters);
+
+            // Convert SpringData units to UE (cm) if requested
+            if (bConvertToUEUnits)
+            {
+                ConvertSpringConfigToUEUnits(TransientSpringData->SpringConfig);
+            }
+
             ValidateBoneNamesAgainstSkeleton(SkeletonSearchRoot, TransientSpringData->SpringConfig);
             TransientSpringData->SourceFilename = Filename;
             if (!SourceHash.IsEmpty())
@@ -267,6 +275,39 @@ void UVRMSpringBonesPostImportPipeline::ValidateBoneNamesAgainstSkeleton(const F
     Report(MC,TEXT("collider BoneName(s)"));
     Report(MJ,TEXT("joint BoneName(s)"));
     Report(MCent,TEXT("center BoneName(s)"));
+}
+
+void UVRMSpringBonesPostImportPipeline::ConvertSpringConfigToUEUnits(FVRMSpringConfig& InOut) const
+{
+    const float Scale = 100.0f; // meters -> centimeters
+    // Springs: scale fields that represent distances or accelerations
+    for (FVRMSpring& S : InOut.Springs)
+    {
+        S.HitRadius   *= Scale; // length
+        S.GravityPower *= Scale; // acceleration magnitude (m/s^2 -> cm/s^2)
+        // Stiffness/Drag/GravityDir remain unchanged
+    }
+
+    // Colliders: scale offsets and radii
+    for (FVRMSpringCollider& Col : InOut.Colliders)
+    {
+        for (FVRMSpringColliderSphere& S : Col.Spheres)
+        {
+            S.Offset *= Scale;
+            S.Radius *= Scale;
+        }
+        for (FVRMSpringColliderCapsule& Cap : Col.Capsules)
+        {
+            Cap.Offset     *= Scale;
+            Cap.TailOffset *= Scale;
+            Cap.Radius     *= Scale;
+        }
+        for (FVRMSpringColliderPlane& P : Col.Planes)
+        {
+            P.Offset *= Scale;
+            // P.Normal is unit-length direction, no scaling
+        }
+    }
 }
 
 bool UVRMSpringBonesPostImportPipeline::FindImportedSkeletalAssets(const FString& SearchRootPackagePath, USkeletalMesh*& OutSkeletalMesh, USkeleton*& OutSkeleton) const

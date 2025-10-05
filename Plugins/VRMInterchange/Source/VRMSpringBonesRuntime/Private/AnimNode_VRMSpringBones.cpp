@@ -5,6 +5,8 @@
 
 /* ============================================================================
  *  VRM Spring Bones Runtime - Core Simulation Node Implementation
+ *  NOTE: All SpringData geometry and scalar lengths are expected to be in UE units (cm).
+ *        No runtime scaling by 100.f remains; pipeline converts from meters to cm when needed.
  * ============================================================================ */
 
 #if !UE_BUILD_SHIPPING && !UE_BUILD_TEST
@@ -222,7 +224,7 @@ void FAnimNode_VRMSpringBones::EnsureStatesInitialized(const FBoneContainer& Bon
 		else
 		{
 			// Derive a reasonable axis from the parent->this direction if possible; fallback to this joint's rest forward.
-			const float VirtualTailLengthCm = 0.07f * 100.f; // 7 cm in UE units (centimeters)
+			const float VirtualTailLengthCm = 7.0f; // 7 cm in UE units (centimeters)
 
 			FVector AxisCS = FVector::ZeroVector;
 			// If we have a valid parent bone transform, use the incoming chain segment direction
@@ -284,10 +286,10 @@ void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseCont
 
 		const float Stiffness      = Spring.Stiffness;
 		const float Drag           = FMath::Clamp(Spring.Drag, 0.f, 1.f);
-		const float GravityPower   = Spring.GravityPower * 100.0f;
+		const float GravityPower   = Spring.GravityPower; // already in cm/s^2 scale
 		const bool  bHasColliders  = Spring.ColliderGroupIndices.Num() > 0;
 		const FVector GravityDir   = Spring.GravityDir;
-		const float DefaultHitRadius = FMath::Max(0.f, Spring.HitRadius * 100.0f);
+		const float DefaultHitRadius = FMath::Max(0.f, Spring.HitRadius); // already in cm
 		const FVector ExternalVel	= (ComponentTM.InverseTransformVector(ExternalVelocity) * ExternalVelocityScale) * DeltaTime * (1.f - Drag);
 		const FVector Gravity = GravityDir * GravityPower * DeltaTime;
 
@@ -419,8 +421,8 @@ void FAnimNode_VRMSpringBones::DrawCollisionSphere(const FComponentSpacePoseCont
 {
 	if (!Context.AnimInstanceProxy) return;
 
-	const FVector Center = NodeXf.TransformPosition(S.Offset * 100.f);
-	const float Radius = S.Radius * 100.f;
+	const FVector Center = NodeXf.TransformPosition(S.Offset);
+	const float Radius = S.Radius;
 
 	if (Radius <= 0.f)
 	{
@@ -434,9 +436,9 @@ void FAnimNode_VRMSpringBones::DrawCollisionCapsule(const FComponentSpacePoseCon
 {
 	if (!Context.AnimInstanceProxy) return;
 
-	const FVector P0 = NodeXf.TransformPosition(Cap.Offset * 100.f);
-	const FVector P1 = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
-	const float Radius = Cap.Radius * 100.f;
+	const FVector P0 = NodeXf.TransformPosition(Cap.Offset);
+	const FVector P1 = NodeXf.TransformPosition(Cap.TailOffset);
+	const float Radius = Cap.Radius;
 
 	const float SegmentLen = (P1 - P0).Size();
 	const float CylinderLen = FMath::Max(0.f, SegmentLen - 2.f * Radius);
@@ -458,11 +460,11 @@ void FAnimNode_VRMSpringBones::DrawCollisionPlane(const FComponentSpacePoseConte
 {
 	if (!Context.AnimInstanceProxy) return;
 
-	const FVector Center = NodeXf.TransformPosition(P.Offset * 100.f);
+	const FVector Center = NodeXf.TransformPosition(P.Offset);
 	FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal();
 	if (NormalWS.IsNearlyZero()) NormalWS = FVector(0, 0, 1);
 
-	const float HalfSize = 25.f * 100.f;
+	const float HalfSize = 2500.f; // purely for debug viz (25m square), in cm
 
 	FVector Tangent = FVector::CrossProduct(NormalWS, FVector(0, 1, 0));
 	if (Tangent.IsNearlyZero()) Tangent = FVector::CrossProduct(NormalWS, FVector(1, 0, 0));
@@ -596,26 +598,26 @@ void FAnimNode_VRMSpringBones::ResolveCollisions(
 
 float FAnimNode_VRMSpringBones::CollideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset * 100.f);
+	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset);
 	const FVector Delta = TailWS - CenterWS;
-	const float Distance = Delta.Length() - (Sph.Radius * 100.f + JointRadius);
+	const float Distance = Delta.Length() - (Sph.Radius + JointRadius);
 	OutPushDir = Delta.GetSafeNormal();
 	return Distance;
 }
 
 float FAnimNode_VRMSpringBones::CollideInsideSphere(const FTransform& NodeXf, const FVRMSpringColliderSphere& Sph, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset * 100.f);
+	const FVector CenterWS = NodeXf.TransformPosition(Sph.Offset);
 	const FVector Delta = TailWS - CenterWS;
-	const float Distance = (Sph.Radius * 100.f - JointRadius) - Delta.Length();
+	const float Distance = (Sph.Radius - JointRadius) - Delta.Length();
 	OutPushDir = -Delta.GetSafeNormal();
 	return Distance;
 }
 
 float FAnimNode_VRMSpringBones::CollideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset * 100.f);
-	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
+	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset);
+	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset);
 	const FVector AtoB   = TailC - HeadWS;
 	FVector Delta = TailWS - HeadWS;
 	const float Dot = FVector::DotProduct(AtoB, Delta);
@@ -625,15 +627,15 @@ float FAnimNode_VRMSpringBones::CollideCapsule(const FTransform& NodeXf, const F
 		if (Dot > SegLenSq) { Delta -= AtoB; }
 		else { Delta -= AtoB * (Dot / SegLenSq); }
 	}
-	const float Distance = Delta.Length() - (Cap.Radius * 100.f + JointRadius);
+	const float Distance = Delta.Length() - (Cap.Radius + JointRadius);
 	OutPushDir = Delta.GetSafeNormal();
 	return Distance;
 }
 
 float FAnimNode_VRMSpringBones::CollideInsideCapsule(const FTransform& NodeXf, const FVRMSpringColliderCapsule& Cap, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset * 100.f);
-	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset * 100.f);
+	const FVector HeadWS = NodeXf.TransformPosition(Cap.Offset);
+	const FVector TailC  = NodeXf.TransformPosition(Cap.TailOffset);
 	const FVector AtoB   = TailC - HeadWS;
 	FVector Delta = TailWS - HeadWS;
 	const float Dot = FVector::DotProduct(AtoB, Delta);
@@ -643,14 +645,14 @@ float FAnimNode_VRMSpringBones::CollideInsideCapsule(const FTransform& NodeXf, c
 		if (Dot > SegLenSq) { Delta -= AtoB; }
 		else { Delta -= AtoB * (Dot / SegLenSq); }
 	}
-	const float Distance = (Cap.Radius * 100.f - JointRadius) - Delta.Length();
+	const float Distance = (Cap.Radius - JointRadius) - Delta.Length();
 	OutPushDir = -Delta.GetSafeNormal();
 	return Distance;
 }
 
 float FAnimNode_VRMSpringBones::CollidePlane(const FTransform& NodeXf, const FVRMSpringColliderPlane& P, const FVector& TailWS, float JointRadius, FVector& OutPushDir) const
 {
-	const FVector OffsetWS = NodeXf.TransformPosition(P.Offset * 100.f);
+	const FVector OffsetWS = NodeXf.TransformPosition(P.Offset);
 	FVector NormalWS = NodeXf.TransformVectorNoScale(P.Normal).GetSafeNormal();
 	if (NormalWS.IsNearlyZero()) NormalWS = FVector(0,0,1);
 	const FVector Delta = TailWS - OffsetWS;
