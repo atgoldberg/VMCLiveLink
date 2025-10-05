@@ -33,8 +33,12 @@ public:
 	FString PipelineDisplayName = "Live Link Actor Set-up";
 
 	/** Generate the LiveLink-enabled Actor + AnimBP scaffold assets */
-	UPROPERTY(EditAnywhere, Category="VRM Character")
+	UPROPERTY(EditAnywhere, Category = "VRM Character")
 	bool bGenerateLiveLinkEnabledActor = true;
+	/** Generate the LiveLink-enabled Actor + AnimBP scaffold assets */
+
+	UPROPERTY(EditAnywhere, Category = "VRM Character")
+	bool bGenerateLiveLinkRetargetActor = true;
 
 	/** If true, overwrite existing assets with the same names; otherwise create unique names */
 	UPROPERTY(EditAnywhere, Category="VRM Character")
@@ -69,6 +73,8 @@ private:
 	/** Assign a SkeletalMesh to the first SkeletalMeshComponent on the actor blueprint CDO; marks dirty */
 	bool AssignSkeletalMeshToActorBP(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const;
 
+	bool AssignSkeletalMeshToActorBPProperty(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const;
+
 	/** Assign an AnimBP class to the actor blueprint’s SkeletalMeshComponent; marks dirty */
 	bool AssignAnimBPToActorBP(UObject* ActorBlueprintObj, UAnimBlueprint* AnimBP) const;
 
@@ -95,6 +101,7 @@ private:
 	FString DeferredAnimBPPath;
 	FString DeferredActorBPName;
 	FString DeferredAnimBPName;
+	FString DeferredRetargetActorBPName;
 	bool bDeferredOverwrite=false;
 #endif
 };

@@ -61,6 +61,7 @@ void UVRMLiveLinkPostImportPipeline::ExecutePipeline(UInterchangeBaseNodeContain
 	DeferredAnimBPPath = AnimFolder;
 	DeferredActorBPName = FString::Printf(TEXT("BP_LL_VRM_%s"), *CharacterName);
 	DeferredAnimBPName  = FString::Printf(TEXT("ABP_LL_VRM_%s"), *CharacterName);
+	DeferredRetargetActorBPName = FString::Printf(TEXT("ABP_LL_VRM_To_UE5_%s"), *CharacterName);
 	bDeferredOverwrite = bOverwriteExisting;
 
 	// Do NOT duplicate here; defer until after import is confirmed and skeletal assets exist
@@ -95,7 +96,46 @@ UObject* UVRMLiveLinkPostImportPipeline::DuplicateTemplate(const TCHAR* Template
 
 bool UVRMLiveLinkPostImportPipeline::AssignSkeletalMeshToActorBP(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const
 {
-	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj); if(!BP||!SkeletalMesh) return false; if(!BP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(BP);} UClass* GenClass=BP->GeneratedClass; if(!GenClass) return false; UObject* CDO=GenClass->GetDefaultObject(); if(!CDO) return false; USkeletalMeshComponent* FoundComp=nullptr; for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) { if(USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) { FoundComp = SKC; break; }} if(!FoundComp){ return false; } FoundComp->SetSkeletalMesh(SkeletalMesh); FoundComp->MarkPackageDirty(); BP->MarkPackageDirty(); return true; }
+	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj);
+	if (!BP || !SkeletalMesh) return false;
+	if (!BP->GeneratedClass) {
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	} UClass* GenClass = BP->GeneratedClass;
+	if (!GenClass) return false;
+	UObject* CDO = GenClass->GetDefaultObject();
+	if (!CDO) return false;
+	USkeletalMeshComponent* FoundComp = nullptr;
+	for (TObjectPtr<UActorComponent> Comp : CastChecked<AActor>(CDO)->GetComponents()) {
+		if (USkeletalMeshComponent* SKC = Cast<USkeletalMeshComponent>(Comp)) {
+			FoundComp = SKC; break;
+		}
+	}
+	if (!FoundComp) { return false; }
+	FoundComp->SetSkeletalMesh(SkeletalMesh);
+	FoundComp->MarkPackageDirty();
+	BP->MarkPackageDirty();
+	return true;
+}
+
+bool UVRMLiveLinkPostImportPipeline::AssignSkeletalMeshToActorBPProperty(UObject* ActorBlueprintObj, USkeletalMesh* SkeletalMesh) const
+{
+	UBlueprint* BP = Cast<UBlueprint>(ActorBlueprintObj);
+	if (!BP || !SkeletalMesh) return false;
+	if (!BP->GeneratedClass) {
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	} UClass* GenClass = BP->GeneratedClass;
+	if (!GenClass) return false;
+	UObject* CDO = GenClass->GetDefaultObject();
+	if (!CDO) return false;
+	if (FObjectProperty* ObjProp = FindFProperty<FObjectProperty>(GenClass, TEXT("VRM Character")))
+	{
+		ObjProp->SetObjectPropertyValue_InContainer(CDO, SkeletalMesh);
+	}
+
+	BP->MarkPackageDirty();
+	return true;
+}
+
 
 bool UVRMLiveLinkPostImportPipeline::AssignAnimBPToActorBP(UObject* ActorBlueprintObj, UAnimBlueprint* AnimBP) const
 {
@@ -155,23 +195,48 @@ void UVRMLiveLinkPostImportPipeline::OnAssetPostImport(UFactory* InFactory, UObj
 	if(!bFound) bFound=FindImportedSkeletalAssets(DeferredAltSkeletonSearchRoot,SkelMesh,Skeleton)&&(SkelMesh||Skeleton);
 	if(!bFound) return;
 
-	// Create assets now, then wire them up
-	UBlueprint* ActorBP = Cast<UBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/BP_VRM_Template.BP_VRM_Template"), DeferredActorBPPath, DeferredActorBPName, bDeferredOverwrite));
-	UAnimBlueprint* AnimBP  = Cast<UAnimBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/Animation/ABP_VRM_Template.ABP_VRM_Template"), DeferredAnimBPPath, DeferredAnimBPName, bDeferredOverwrite));
+	if(bGenerateLiveLinkEnabledActor) {
+		// Create LiveLink Actor + AnimBP
+		const FString EffectiveCharacterName = ResolveEffectiveCharacterName(SkelMesh, DeferredPackagePath);
+		if (!EffectiveCharacterName.IsEmpty())
+		{
+			DeferredActorBPName = FString::Printf(TEXT("BP_LL_VRM_%s"), *EffectiveCharacterName);
+			DeferredAnimBPName  = FString::Printf(TEXT("ABP_LL_VRM_%s"), *EffectiveCharacterName);
+			// Create assets now, then wire them up
+			UBlueprint* ActorBP = Cast<UBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/BP_LL_VRM_Template.BP_LL_VRM_Template"), DeferredActorBPPath, DeferredActorBPName, bDeferredOverwrite));
+			UAnimBlueprint* AnimBP = Cast<UAnimBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/Animation/ABP_LL_VRM_Template.ABP_LL_VRM_Template"), DeferredAnimBPPath, DeferredAnimBPName, bDeferredOverwrite));
 
-	if (SkelMesh && AnimBP)
-	{
-		SetPreviewMeshOnAnimBP(AnimBP, SkelMesh);
-	}
-	if (ActorBP && SkelMesh)
-	{
-		AssignSkeletalMeshToActorBP(ActorBP, SkelMesh);
-		if (AnimBP) AssignAnimBPToActorBP(ActorBP, AnimBP);
+			if (SkelMesh && AnimBP)
+			{
+				SetPreviewMeshOnAnimBP(AnimBP, SkelMesh);
+			}
+			if (ActorBP && SkelMesh)
+			{
+				AssignSkeletalMeshToActorBP(ActorBP, SkelMesh);
+				if (AnimBP) AssignAnimBPToActorBP(ActorBP, AnimBP);
+			}
+
+			// Leave packages dirty; let editor Save/SCC handle persistence
+			if (AnimBP) { AnimBP->MarkPackageDirty(); }
+			if (ActorBP) { ActorBP->MarkPackageDirty(); }
+		}
 	}
 
-	// Leave packages dirty; let editor Save/SCC handle persistence
-	if (AnimBP)  { AnimBP->MarkPackageDirty(); }
-	if (ActorBP) { ActorBP->MarkPackageDirty(); }
+	if (bGenerateLiveLinkRetargetActor)
+	{
+		// Create Retarget Actor
+		const FString EffectiveCharacterName = ResolveEffectiveCharacterName(SkelMesh, DeferredPackagePath);
+		if (!EffectiveCharacterName.IsEmpty())
+		{
+			DeferredRetargetActorBPName = FString::Printf(TEXT("BP_LL_VRM_To_UE5_%s"), *EffectiveCharacterName);
+			UBlueprint* RetargetActorBP = Cast<UBlueprint>(DuplicateTemplate(TEXT("/VRMInterchange/BP_LL_VRM_To_UE5_Template.BP_LL_VRM_To_UE5_Template"), DeferredActorBPPath, DeferredRetargetActorBPName, bDeferredOverwrite));
+			if (RetargetActorBP && SkelMesh)
+			{
+				AssignSkeletalMeshToActorBPProperty(RetargetActorBP, SkelMesh);
+			}
+			if (RetargetActorBP) { RetargetActorBP->MarkPackageDirty(); }
+		}
+	}
 
 	bDeferredCompleted = true;
 	UnregisterPostImportCommit();
