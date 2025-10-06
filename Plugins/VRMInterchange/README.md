@@ -212,6 +212,8 @@ The spring bone solver uses:
 - **Collision Detection**: Per-joint sphere and capsule collision
 
 Debug visualization is available via console commands:
+
+*To access the console in Unreal Engine, press the tilde key (`~`) in the editor, or open the Output Log window and enter commands there.*
 ```
 vrm.SpringBones.Debug 1    // Enable debug draw
 vrm.SpringBones.Debug 0    // Disable debug draw
