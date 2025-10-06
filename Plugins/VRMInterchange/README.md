@@ -196,13 +196,6 @@ When re-importing:
 3. Manual edits to generated blueprints are preserved
 4. Texture and material updates are applied
 
-### Custom Import Pipelines
-
-You can create custom import pipelines by:
-1. Creating a Blueprint class derived from `InterchangePipelineBase`
-2. Implementing custom post-import logic
-3. Adding your pipeline to the Interchange project settings
-
 ### Spring Bone Simulation Details
 
 The spring bone solver uses:
@@ -215,8 +208,10 @@ Debug visualization is available via console commands:
 
 *To access the console in Unreal Engine, press the tilde key (`~`) in the editor, or open the Output Log window and enter commands there.*
 ```
-vrm.SpringBones.Debug 1    // Enable debug draw
-vrm.SpringBones.Debug 0    // Disable debug draw
+vrm.SpringBones.DrawColliders 1    // Enable collider debug draw
+vrm.SpringBones.DrawColliders 0    // Disable collider debug draw
+vrm.SpringBones.DrawSprings 1      // Enable spring debug draw
+vrm.SpringBones.DrawSprings 0      // Disable spring debug draw
 ```
 
 ## Troubleshooting
@@ -294,7 +289,7 @@ VRM uses Y-up, right-handed coordinates. The importer converts to UE5's Z-up, le
 
 ## Known Limitations
 
-- **VRM Version**: Currently supports VRM 0.x (not VRM 1.0 yet)
+- **VRM Version**: Supports VRM 0.x and VRM 1.0
 - **Material Complexity**: Complex shader graphs may require manual adjustment
 - **Expression Mapping**: Blend shape to morph target mapping is direct (no presets)
 - **Texture Formats**: Embedded textures must be PNG or JPEG
