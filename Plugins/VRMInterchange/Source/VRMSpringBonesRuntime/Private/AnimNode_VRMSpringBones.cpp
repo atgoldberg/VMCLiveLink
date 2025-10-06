@@ -324,9 +324,10 @@ void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseCont
 			const FVector RestTargetCS = CurrentHeadPosCS + AnimatedBoneRotCS.RotateVector(JointState.InitialLocalChildPos);
 
 			FVector SimTailPos = JointState.CurrentTail + Inertia + Gravity + ExternalVel;
+			
 			if (!RestTargetCS.ContainsNaN())
 			{
-				const float StiffScale = Stiffness * DeltaTime;
+				const float StiffScale = Stiffness; // * DeltaTime; // NOTE: Removed DeltaTime scaling to match typical spring behavior
 				SimTailPos += (RestTargetCS - SimTailPos) * StiffScale;
 			}
 
@@ -334,6 +335,7 @@ void FAnimNode_VRMSpringBones::SimulateSpringsOnce(const FComponentSpacePoseCont
 
 			const FVector PostSimHeadPos = JointState.PrevHeadCS;
 			const FQuat   BoneRotCS = JointBoneCS.GetRotation();
+
 			FVector PostSimTailPositionFixed = ApplyLengthConstraint(JointState, SimTailPos, PostSimHeadPos);
 
 			if (bHasColliders)
