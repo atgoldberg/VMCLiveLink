@@ -7,7 +7,7 @@ The VRM Interchange plugin is a comprehensive VRM (.vrm) importer for Unreal Eng
 ## Features
 
 ### Core Import Capabilities
-- **VRM Format Support**: Imports VRM 0.x files (glTF 2.0-based avatar format)
+- **VRM Format Support**: Imports VRM 0.x / 1.0 files (glTF 2.0-based avatar format)
 - **Skeletal Mesh**: Full skeleton hierarchy with proper bone orientations
 - **Textures**: Automatic texture import with proper material setup
 - **Blend Shapes**: Morph target support for facial expressions
