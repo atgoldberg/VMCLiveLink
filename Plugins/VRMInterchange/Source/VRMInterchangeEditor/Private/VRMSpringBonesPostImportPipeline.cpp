@@ -1,4 +1,5 @@
-﻿// VRMSpringBonesPostImportPipeline
+﻿// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
+// VRMSpringBonesPostImportPipeline
 // - Defers any on-disk mutations until after the user confirms the import dialog.
 // - Creates assets (Spring data + optional post-process ABP), marks packages dirty,
 //   and does NOT save during import. Let the editor Save/Source Control flow handle persistence.
@@ -373,7 +374,7 @@ bool UVRMSpringBonesPostImportPipeline::SetSpringConfigOnAnimBlueprint(UObject* 
 
     if(UAnimBlueprint* ABP=Cast<UAnimBlueprint>(AnimBlueprintObj))
     {
-        if(!ABP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(ABP);}
+        if(!ABP->GeneratedClass){ FKismetEditorUtilities::CompileBlueprint(ABP);} 
         UAnimBlueprintGeneratedClass* GenClass=Cast<UAnimBlueprintGeneratedClass>(ABP->GeneratedClass);
         if(!GenClass) return false;
         UObject* CDO=GenClass->GetDefaultObject();
