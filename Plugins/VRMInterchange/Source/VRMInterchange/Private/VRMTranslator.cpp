@@ -207,7 +207,7 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
         BoneNode->AddSpecializedType(UE::Interchange::FSceneNodeStaticData::GetJointSpecializeTypeString());
     }
 
-    // Textures: add a node for each image discovered in the file and pre-create matching factory nodes for subpath control
+    // Textures: nodes and factories
     TexturePayloadKeys.Reset();
     TArray<FString> TextureNodeUids;
     TextureNodeUids.SetNum(Parsed.Images.Num());
@@ -222,16 +222,13 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
         TexNode->SetPayLoadKey(TextureKey);
 
 #if WITH_EDITORONLY_DATA
-        // Pre-create the factory node expected by the pipeline and set Textures subfolder
         const FString TexFactoryUid = UInterchangeTexture2DFactoryNode::GetTextureFactoryNodeUidFromTextureNodeUid(TexUid);
         UInterchangeTexture2DFactoryNode* TexFactory = Cast<UInterchangeTexture2DFactoryNode>(NodeContainer.GetFactoryNode(TexFactoryUid));
         if (!TexFactory)
         {
             TexFactory = NewObject<UInterchangeTexture2DFactoryNode>(&NodeContainer);
-            // Initialize as factory data (sets up node in NodeContainer)
             TexFactory->InitializeTextureNode(TexFactoryUid, TexNode->GetDisplayLabel(), TexNode->GetDisplayLabel(), &NodeContainer);
         }
-        // Ensure the factory points to the translated texture node so the pipeline can fetch the payload
         TexFactory->SetCustomTranslatedTextureNodeUid(TexUid);
         TexFactory->AddTargetNodeUid(TexUid);
         TexNode->AddTargetNodeUid(TexFactory->GetUniqueID());
@@ -239,99 +236,98 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
 #endif
     }
 
-    // Create material shader graph nodes per parsed material
+    // Create Material Instances:
+    // - One character-level MI parented to the master material
+    // - One MI per VRM material parented to the master material
+    const FString CharacterName = FPaths::GetBaseFilename(GetSourceData()->GetFilename());
+
+    // Character-level MI
+    const FString CharacterMIDisplayName = FString::Printf(TEXT("MI_VRM_%s"), *CharacterName);
+    const FString CharacterMIUid = MakeNodeUid(TEXT("MI_Character"));
+    UInterchangeMaterialInstanceNode* CharacterMINode = NewObject<UInterchangeMaterialInstanceNode>(&NodeContainer);
+    NodeContainer.SetupNode(CharacterMINode, CharacterMIUid, *CharacterMIDisplayName, EInterchangeNodeContainerType::TranslatedAsset);
+
+    // Parent to master material with safe path fallback (verified API only)
+    {
+        bool bParentSet = false;
+        const FString MasterShortPath = TEXT("/VRMInterchange/Materials/M_VRM_Master");
+        const FString MasterFullPath  = TEXT("/VRMInterchange/Materials/M_VRM_Master.M_VRM_Master");
+
+        bParentSet = CharacterMINode->SetCustomParent(MasterShortPath);
+        if (!bParentSet)
+        {
+            bParentSet = CharacterMINode->SetCustomParent(MasterFullPath);
+        }
+        if (!bParentSet)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Failed to set Character MI parent. Tried '%s' and '%s'"), *MasterShortPath, *MasterFullPath);
+        }
+    }
+
+    // Per-material MIs parented to the master material (not the character MI)
     TArray<FString> MaterialNodeUids;
     MaterialNodeUids.SetNum(Parsed.Materials.Num());
     for (int32 mi = 0; mi < Parsed.Materials.Num(); ++mi)
     {
         const auto& M = Parsed.Materials[mi];
-        const FString MatNodeUid = MakeNodeUid(*FString::Printf(TEXT("Mat_%d"), mi));
-        MaterialNodeUids[mi] = MatNodeUid;
+        const FString MatDisplayName = M.Name.IsEmpty() ? FString::Printf(TEXT("VRM_Mat_%d"), mi) : M.Name;
+        const FString PerMIDisplayName = FString::Printf(TEXT("MI_VRM_%s_%s"), *CharacterName, *MatDisplayName);
 
-        // Material (shader graph) node
-        UInterchangeShaderGraphNode* MatGraph = NewObject<UInterchangeShaderGraphNode>(&NodeContainer);
-        NodeContainer.SetupNode(MatGraph, MatNodeUid, M.Name.IsEmpty() ? *FString::Printf(TEXT("VRM_Mat_%d"), mi) : *M.Name, EInterchangeNodeContainerType::TranslatedAsset);
+        const FString MatMIUid = MakeNodeUid(*FString::Printf(TEXT("MI_%d"), mi));
+        MaterialNodeUids[mi] = MatMIUid;
 
-        // Basic shading settings
-        if (M.bDoubleSided) { MatGraph->SetCustomTwoSided(true); }
-        // Force Masked blend for VRM; use AlphaCutoff if provided otherwise default to 0.5
-        MatGraph->SetCustomBlendMode(EBlendMode::BLEND_Masked);
-        if (M.AlphaMode == 1) { MatGraph->SetCustomOpacityMaskClipValue(M.AlphaCutoff); }
-        else { MatGraph->SetCustomOpacityMaskClipValue(0.5f); }
+        UInterchangeMaterialInstanceNode* MatMINode = NewObject<UInterchangeMaterialInstanceNode>(&NodeContainer);
+        NodeContainer.SetupNode(MatMINode, MatMIUid, *PerMIDisplayName, EInterchangeNodeContainerType::TranslatedAsset);
 
-        using namespace UE::Interchange::Materials::Standard::Nodes;
-        using namespace UE::Interchange::Materials;
-
-        auto AddTextureSample = [&](const FString& NodeName, int32 ImageIndex)->UInterchangeShaderNode*
+        // Assign texture parameters
+        if (M.BaseColorTexture != INDEX_NONE && Parsed.Images.IsValidIndex(M.BaseColorTexture))
         {
-            if (!Parsed.Images.IsValidIndex(ImageIndex)) return (UInterchangeShaderNode*)nullptr;
-            UInterchangeShaderNode* TS = NewObject<UInterchangeShaderNode>(&NodeContainer);
-            const FString TexSampleUid = MatNodeUid + TEXT("_") + NodeName;
-            NodeContainer.SetupNode(TS, TexSampleUid, NodeName, EInterchangeNodeContainerType::TranslatedAsset, MatNodeUid);
-            TS->SetCustomShaderType(TextureSample::Name.ToString());
-            TS->AddStringInput(TextureSample::Inputs::Texture.ToString(), TextureNodeUids[ImageIndex], /*bIsAParameter*/ true);
-            return TS;
-        };
-
-        // BaseColor
-        if (M.BaseColorTexture != INDEX_NONE)
+            MatMINode->AddTextureParameterValue(TEXT("BaseColorTexture"), TextureNodeUids[M.BaseColorTexture]);
+        }
+        if (M.NormalTexture != INDEX_NONE && Parsed.Images.IsValidIndex(M.NormalTexture))
         {
-            if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("BaseColorTex"), M.BaseColorTexture))
+            MatMINode->AddTextureParameterValue(TEXT("NormalTexture"), TextureNodeUids[M.NormalTexture]);
+        }
+        if (M.MetallicRoughnessTexture != INDEX_NONE && Parsed.Images.IsValidIndex(M.MetallicRoughnessTexture))
+        {
+            MatMINode->AddTextureParameterValue(TEXT("ORMTexture"), TextureNodeUids[M.MetallicRoughnessTexture]);
+        }
+        if (M.OcclusionTexture != INDEX_NONE && Parsed.Images.IsValidIndex(M.OcclusionTexture))
+        {
+            MatMINode->AddTextureParameterValue(TEXT("OcclusionTexture"), TextureNodeUids[M.OcclusionTexture]);
+        }
+        if (M.EmissiveTexture != INDEX_NONE && Parsed.Images.IsValidIndex(M.EmissiveTexture))
+        {
+            MatMINode->AddTextureParameterValue(TEXT("EmissiveTexture"), TextureNodeUids[M.EmissiveTexture]);
+        }
+        // Set "Has ORM Texture?" boolean based on presence of ORM (MetallicRoughness) texture
+        {
+            const bool bHasORM = (M.MetallicRoughnessTexture != INDEX_NONE);
+            MatMINode->AddStaticSwitchParameterValue(TEXT("Has ORM Texture?"), bHasORM);
+        }
+        // Set "Has Emissive Texture?" boolean based on presence of Emissive texture
+        {
+            const bool bHasEmissive = (M.EmissiveTexture != INDEX_NONE);
+            MatMINode->AddStaticSwitchParameterValue(TEXT("Has Emissive Texture?"), bHasEmissive);
+        }
+
+        // Parent per-material MI to the master material (verified API)
+        {
+            bool bMatParentSet = false;
+            const FString MasterShortPath = TEXT("/VRMInterchange/Materials/M_VRM_Master");
+            const FString MasterFullPath  = TEXT("/VRMInterchange/Materials/M_VRM_Master.M_VRM_Master");
+
+            bMatParentSet = MatMINode->SetCustomParent(MasterShortPath);
+            if (!bMatParentSet)
             {
-                UInterchangeShaderPortsAPI::ConnectDefaultOuputToInput(MatGraph, PBRMR::Parameters::BaseColor.ToString(), TS->GetUniqueID());
-                // Also route alpha to OpacityMask to support cutouts from base color alpha
-                UInterchangeShaderPortsAPI::ConnectOuputToInputByName(MatGraph, PBRMR::Parameters::OpacityMask.ToString(), TS->GetUniqueID(), TextureSample::Outputs::A.ToString());
+                bMatParentSet = MatMINode->SetCustomParent(MasterFullPath);
+            }
+            if (!bMatParentSet)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[VRMInterchange] Failed to set MI '%s' parent to master. Tried '%s' and '%s'"),
+                    *PerMIDisplayName, *MasterShortPath, *MasterFullPath);
             }
         }
-        // Normal
-        if (M.NormalTexture != INDEX_NONE)
-        {
-            if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("NormalTex"), M.NormalTexture))
-            {
-                UInterchangeShaderPortsAPI::ConnectDefaultOuputToInput(MatGraph, Common::Parameters::Normal.ToString(), TS->GetUniqueID());
-            }
-        }
-        // MetallicRoughness (metallic in B, roughness in G)
-        if (M.MetallicRoughnessTexture != INDEX_NONE)
-        {
-            if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("MR_Tex"), M.MetallicRoughnessTexture))
-            {
-                UInterchangeShaderPortsAPI::ConnectOuputToInputByName(MatGraph, PBRMR::Parameters::Roughness.ToString(), TS->GetUniqueID(), TextureSample::Outputs::G.ToString());
-                UInterchangeShaderPortsAPI::ConnectOuputToInputByName(MatGraph, PBRMR::Parameters::Metallic.ToString(), TS->GetUniqueID(), TextureSample::Outputs::B.ToString());
-            }
-        }
-        // Occlusion (R)
-        if (M.OcclusionTexture != INDEX_NONE)
-        {
-            if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("AO_Tex"), M.OcclusionTexture))
-            {
-                UInterchangeShaderPortsAPI::ConnectOuputToInputByName(MatGraph, PBRMR::Parameters::Occlusion.ToString(), TS->GetUniqueID(), TextureSample::Outputs::R.ToString());
-            }
-        }
-        // Emissive
-        if (M.EmissiveTexture != INDEX_NONE)
-        {
-            if (UInterchangeShaderNode* TS = AddTextureSample(TEXT("Emissive_Tex"), M.EmissiveTexture))
-            {
-                UInterchangeShaderPortsAPI::ConnectDefaultOuputToInput(MatGraph, PBRMR::Parameters::EmissiveColor.ToString(), TS->GetUniqueID());
-            }
-        }
-
-        // Toon parameters as overridable scalar parameters (so instances can tweak)
-        MatGraph->AddFloatInput(TEXT("BandSteps"), 4.0f, /*bIsAParameter*/ true);
-        MatGraph->AddFloatInput(TEXT("RimIntensity"), 0.5f, /*bIsAParameter*/ true);
-        MatGraph->AddFloatInput(TEXT("RimWidth"), 0.3f, /*bIsAParameter*/ true);
-
-#if WITH_EDITORONLY_DATA
-        // Ensure factory node exists for this material (using expected UID) and set Materials subpath
-        const FString MatFactoryUid = UInterchangeMaterialFactoryNode::GetMaterialFactoryNodeUidFromMaterialNodeUid(MatNodeUid);
-        if (!NodeContainer.GetFactoryNode(MatFactoryUid))
-        {
-            UInterchangeMaterialFactoryNode* MatFactory = NewObject<UInterchangeMaterialFactoryNode>(&NodeContainer);
-            NodeContainer.SetupNode(MatFactory, MatFactoryUid, MatGraph->GetDisplayLabel(), EInterchangeNodeContainerType::TranslatedAsset);
-            MatFactory->SetCustomSubPath(MaterialsSubPath);
-        }
-#endif
     }
 
     // Name base color textures after their material (suffix _DIFFUSE)
@@ -369,7 +365,7 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
     MeshNode->SetSkinnedMesh(true);
     MeshNode->SetSkeletonDependencyUid(RootJointUid);
 
-    // Assign material slots to MATERIAL NODE UIDs (pipeline will resolve to factory nodes)
+    // Assign material slots to MATERIAL NODE UIDs
     for (int32 mi = 0; mi < Parsed.Materials.Num(); ++mi)
     {
         const FString SlotName = FString::Printf(TEXT("MatSlot_%d"), mi);
@@ -383,35 +379,25 @@ bool UVRMTranslator::Translate(UInterchangeBaseNodeContainer& NodeContainer) con
     SkelActorNode->SetCustomAssetInstanceUid(MeshNodeUid);
     SkelActorNode->SetCustomLocalTransform(&NodeContainer, FTransform::Identity);
 
-    // Create Interchange mesh nodes for each parsed morph target so the pipeline can request morph payloads
+    // Morph target mesh nodes
     for (int32 MorphIndex = 0; MorphIndex < Parsed.Mesh.Morphs.Num(); ++MorphIndex)
     {
         const FVRMParsedMorph& PMorph = Parsed.Mesh.Morphs[MorphIndex];
-        // Make a node UID unique to this morph
         const FString MorphNodeUid = MakeNodeUid(*FString::Printf(TEXT("Morph_%d"), MorphIndex));
-        // Fallback to generated name if none present
         const FString MorphDisplayName = PMorph.Name.IsEmpty() ? FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex) : PMorph.Name;
 
-        // Skip if node already exists
         if (const UInterchangeMeshNode* Existing = Cast<UInterchangeMeshNode>(NodeContainer.GetNode(MorphNodeUid)))
         {
-            // Ensure dependency on mesh
             MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
             continue;
         }
 
         UInterchangeMeshNode* MorphNode = NewObject<UInterchangeMeshNode>(&NodeContainer);
         NodeContainer.SetupNode(MorphNode, MorphNodeUid, *MorphDisplayName, EInterchangeNodeContainerType::TranslatedAsset);
-
-        // Assign a unique payload key so the pipeline can request payload data for this morph (payload handling can be implemented later)
         const FString MorphPayloadKey = FString::Printf(TEXT("VRM_Morph_%d"), MorphIndex);
         MorphNode->SetPayLoadKey(MorphPayloadKey, EInterchangeMeshPayLoadType::MORPHTARGET);
-
-        // Mark as morph target and set its name
         MorphNode->SetMorphTarget(true);
         MorphNode->SetMorphTargetName(MorphDisplayName);
-
-        // Add dependency on the main mesh so the pipeline knows this morph belongs to the mesh
         MeshNode->SetMorphTargetDependencyUid(MorphNodeUid);
     }
 
@@ -426,19 +412,16 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
 {
     using namespace UE::Interchange;
 
-    // Read optional global transform attribute (used by factories)
     FTransform MeshGlobalTransform = FTransform::Identity;
     PayloadAttributes.GetAttribute(UE::Interchange::FAttributeKey{ MeshPayload::Attributes::MeshGlobalTransform }, MeshGlobalTransform);
 
     const auto& PMesh = Parsed.Mesh;
 
-    // If requester asked for a morph payload, try to identify which morph and serve it
     if (PayLoadKey.Type == EInterchangeMeshPayLoadType::MORPHTARGET)
     {
         const FString Unique = PayLoadKey.UniqueId;
         int32 MorphIndex = INDEX_NONE;
 
-        // Expected key format: "VRM_Morph_%d" as created in Translate()
         const FString Prefix(TEXT("VRM_Morph_"));
         if (Unique.StartsWith(Prefix))
         {
@@ -450,7 +433,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
         }
         else
         {
-            // Fallback: try parse trailing integer
             int32 LastUnderscore = INDEX_NONE;
             if (Unique.FindLastChar(TEXT('_'), LastUnderscore) && LastUnderscore != INDEX_NONE)
             {
@@ -472,7 +454,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
 
         const FVRMParsedMorph& PMorph = PMesh.Morphs[MorphIndex];
 
-        // Build a payload MeshDescription that represents the morphed mesh (base + delta)
         FMeshPayloadData Data;
         FMeshDescription& MD = Data.MeshDescription;
         FStaticMeshAttributes StaticAttrs(MD);
@@ -487,7 +468,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
 
         VertexInstanceUVs.SetNumChannels(1);
 
-        // Create vertices using morphed positions (base + delta)
         TArray<FVertexID> Vertices;
         Vertices.Reserve(PMesh.Positions.Num());
 
@@ -502,7 +482,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             Vertices.Add(V);
         }
 
-        // Create polygon groups per material index used
         TMap<int32, FPolygonGroupID> MatToPG;
         auto GetPGForMat = [&](int32 MatIndex)->FPolygonGroupID
         {
@@ -514,7 +493,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             return PG;
         };
 
-        // Build triangles mirroring base mesh topology (same indices)
         const int32 TriCount = PMesh.Indices.Num() / 3;
         for (int32 t = 0; t < TriCount; ++t)
         {
@@ -540,7 +518,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             MD.CreateTriangle(PG, { VI0, VI1, VI2 });
         }
 
-        // Joint names: use parsed bones, fallback to root only
         Data.JointNames.Reset();
         if (Parsed.Bones.Num() > 0)
         {
@@ -554,7 +531,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             Data.JointNames.Add(TEXT("VRM_Root"));
         }
 
-        // Skin weights: copy base mesh weights (same vertex ordering)
         FSkinWeightsVertexAttributesRef SkinWeights = SkelAttrs.GetVertexSkinWeights();
         const int32 NumVerts = MD.Vertices().Num();
         UE::AnimationCore::FBoneWeightsSettings Settings;
@@ -581,7 +557,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
         }
         else
         {
-            // Fallback: bind to root
             const UE::AnimationCore::FBoneWeight RootInfluence(0, 1.0f);
             const UE::AnimationCore::FBoneWeights RootBinding = UE::AnimationCore::FBoneWeights::Create({ RootInfluence });
             for (const FVertexID VertexID : MD.Vertices().GetElementIDs())
@@ -594,7 +569,7 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
         return Data;
     }
 
-    // Default path: return merged base skeletal mesh payload (existing behavior)
+    // Base mesh payload
     {
         FMeshPayloadData Data;
         FMeshDescription& MD = Data.MeshDescription;
@@ -610,7 +585,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
 
         VertexInstanceUVs.SetNumChannels(1);
 
-        // Create vertices
         TArray<FVertexID> Vertices;
         Vertices.Reserve(PMesh.Positions.Num());
         for (const FVector3f& P : PMesh.Positions)
@@ -620,7 +594,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             Vertices.Add(V);
         }
 
-        // Create polygon groups per material index used
         TMap<int32, FPolygonGroupID> MatToPG;
         auto GetPGForMat = [&](int32 MatIndex)->FPolygonGroupID
         {
@@ -632,7 +605,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
             return PG;
         };
 
-        // Build triangles, route into PGs by TriMaterialIndex
         const int32 TriCount = PMesh.Indices.Num() / 3;
         for (int32 t = 0; t < TriCount; ++t)
         {
@@ -654,16 +626,11 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
 
             const int32 MatIndex = PMesh.TriMaterialIndex.IsValidIndex(t) ? PMesh.TriMaterialIndex[t] : 0;
             const FPolygonGroupID PG = GetPGForMat(MatIndex);
-            // Reverse winding (glTF->UE handedness)
-            // Note: We also apply an additional mirror in RefFix, which flips handedness again.
-            // So we do NOT reverse the winding here to keep normals facing outward.
             MD.CreateTriangle(PG, { VI0, VI1, VI2 });
         }
 
-        // Skin weights and joint names
         FSkinWeightsVertexAttributesRef SkinWeights = SkelAttrs.GetVertexSkinWeights();
 
-        // Joint names: use parsed bones, fallback to root only
         Data.JointNames.Reset();
         if (Parsed.Bones.Num() > 0)
         {
@@ -702,7 +669,6 @@ TOptional<UE::Interchange::FMeshPayloadData> UVRMTranslator::GetMeshPayloadData(
         }
         else
         {
-            // Fallback: bind to root
             const UE::AnimationCore::FBoneWeight RootInfluence(0, 1.0f);
             const UE::AnimationCore::FBoneWeights RootBinding = UE::AnimationCore::FBoneWeights::Create({ RootInfluence });
             for (const FVertexID VertexID : MD.Vertices().GetElementIDs())
@@ -830,7 +796,6 @@ static FCgltfScoped ParseCgltfFile(const FString& Filename, FString& OutError)
         return FCgltfScoped(nullptr);
     }
 
-    // Wrap immediately so any early returns free Data
     FCgltfScoped ScopedData(Data);
 
     Res = cgltf_load_buffers(&Options, Data, PathUtf8.Get());
@@ -840,7 +805,6 @@ static FCgltfScoped ParseCgltfFile(const FString& Filename, FString& OutError)
         return FCgltfScoped(nullptr);
     }
 
-    // Validate (non-fatal for many glTFs, but keep call to detect issues early)
     cgltf_validate(Data);
 
     return ScopedData;
@@ -853,7 +817,6 @@ static TMap<int32, int32> BuildNodeToBoneMap(const cgltf_skin* Skin, const cgltf
     if (!Skin || !Data) return Map;
     for (size_t ji = 0; ji < Skin->joints_count; ++ji)
     {
-        // compute node index relative to Data->nodes array (same approach as original code)
         const int32 NodeIndex = int32(Skin->joints[ji] - Data->nodes);
         Map.Add(NodeIndex, int32(ji));
     }
@@ -934,7 +897,7 @@ static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* 
                 Out.Mesh.UV0.Add(UVLocal[v]);
             }
 
-            // JOINTS/WEIGHTS if available for this primitive
+            // JOINTS/WEIGHTS
             TArray<FVRMParsedMesh::FWeight> WeightsLocal; WeightsLocal.SetNumZeroed(VertCount);
             bool bHaveJw = false;
             if (Skin)
@@ -943,7 +906,6 @@ static bool MergePrimitivesFromMeshes(const cgltf_data* Data, const cgltf_skin* 
                 const cgltf_attribute* AW = FindWeights(Prim, 0);
                 if (AJ && AW && AJ->data && AW->data)
                 {
-                    // Temporary array then append
                     TArray<FVRMParsedMesh::FWeight> Tmp; Tmp.SetNumZeroed(VertCount);
                     ReadJointsWeights(*AJ->data, *AW->data, NodeToBone, Tmp);
                     WeightsLocal = MoveTemp(Tmp);
