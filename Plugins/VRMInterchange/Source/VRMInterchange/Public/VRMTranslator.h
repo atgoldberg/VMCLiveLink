@@ -1,4 +1,5 @@
-﻿#pragma once
+﻿// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
+#pragma once
 
 #include "CoreMinimal.h"
 #include "InterchangeTranslatorBase.h"

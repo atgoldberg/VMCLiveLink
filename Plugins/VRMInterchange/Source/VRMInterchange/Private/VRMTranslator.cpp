@@ -1,4 +1,5 @@
-﻿#include "VRMTranslator.h"
+﻿// Copyright (c) 2025 Lifelike & Believable Animation Design, Inc. | Athomas Goldberg. All Rights Reserved.
+#include "VRMTranslator.h"
 #include "InterchangeSourceData.h"
 #include "Nodes/InterchangeBaseNodeContainer.h"
 #include "InterchangeSceneNode.h"
